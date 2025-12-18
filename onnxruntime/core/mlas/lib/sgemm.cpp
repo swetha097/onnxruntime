@@ -1,6 +1,6 @@
 /*++
 
-Copyright (c) Microsoft Corporation. All rights reserved.
+    // Copy data from matrix B into the destination buffer 16 columns at a
 
 Licensed under the MIT License.
 
@@ -16,6 +16,7 @@ Abstract:
 --*/
 
 #include "mlasi.h"
+#include <stdio.h>
 
 //
 // Define the number of rows from matrix A to transpose to a local buffer.
@@ -247,112 +248,89 @@ Return Value:
 
 --*/
 {
-    //
-    // Copy data from matrix B into the destination buffer 16 columns at a
-    // time.
-    //
+    // fprintf(stderr, "[TRACE] MlasSgemmCopyPackB called: CountX=%zu, CountY=%zu, ldb=%zu\n", CountX, CountY, ldb);
+    // fflush(stderr);
+    
+    constexpr size_t SLOT_WIDTH = 16;
 
-    while (CountX >= 16) {
-
-        const float* b = B;
-        size_t y = CountY;
-
-        do {
-
+    // Helper: copies a SLOT_WIDTH-slot from a source row into the packed
+    // destination slot. When `remaining_cols < SLOT_WIDTH`, zero-fills the
+    // slot then selectively overwrites the valid elements.
+    auto Store16Slot = [SLOT_WIDTH](float* dst, const float* src_row, size_t remaining_cols) {
 #if defined(MLAS_NEON_INTRINSICS)
-            vst4q_f32(D, vld4q_f32(b));
+        (void)dst; (void)src_row; (void)remaining_cols;
 #else
-            MLAS_FLOAT32X4 t0 = MlasLoadFloat32x4(&b[0]);
-            MLAS_FLOAT32X4 t1 = MlasLoadFloat32x4(&b[4]);
-            MLAS_FLOAT32X4 t2 = MlasLoadFloat32x4(&b[8]);
-            MLAS_FLOAT32X4 t3 = MlasLoadFloat32x4(&b[12]);
+        if (remaining_cols >= SLOT_WIDTH) {
+            MLAS_FLOAT32X16 v = MlasLoadFloat32x16(src_row);
+            MlasStoreFloat32x16(dst, v);
+            return;
+        }
 
-            MlasStoreAlignedFloat32x4(&D[0], t0);
-            MlasStoreAlignedFloat32x4(&D[4], t1);
-            MlasStoreAlignedFloat32x4(&D[8], t2);
-            MlasStoreAlignedFloat32x4(&D[12], t3);
+        // Zero-fill and then copy valid elements in descending chunk sizes.
+        MlasStoreFloat32x16(dst, MlasBroadcastFloat32x16(0.0f));
+
+        const float* src = src_row;
+        float* dst_ptr = dst;
+
+        if ((remaining_cols & 8) != 0) {
+            MlasStoreAlignedFloat32x4(dst_ptr, MlasLoadFloat32x4(src));
+            MlasStoreAlignedFloat32x4(dst_ptr + 4, MlasLoadFloat32x4(src + 4));
+            dst_ptr += 8;
+            src += 8;
+        }
+
+        if ((remaining_cols & 4) != 0) {
+            MlasStoreAlignedFloat32x4(dst_ptr, MlasLoadFloat32x4(src));
+            dst_ptr += 4;
+            src += 4;
+        }
+
+        if ((remaining_cols & 2) != 0) {
+            dst_ptr[0] = src[0];
+            dst_ptr[1] = src[1];
+            dst_ptr += 2;
+            src += 2;
+        }
+
+        if ((remaining_cols & 1) != 0) {
+            dst_ptr[0] = src[0];
+        }
 #endif
+    };
 
-            D += 16;
-            b += ldb;
-            y--;
+    // Process full SLOT_WIDTH-column chunks.
+    while (CountX >= SLOT_WIDTH) {
+        for (size_t y = 0; y < CountY; ++y) {
+#if defined(MLAS_NEON_INTRINSICS)
+            vst4q_f32(D, vld4q_f32(B + y * ldb));
+#else
+            Store16Slot(D, B + y * ldb, SLOT_WIDTH);
+#endif
+            D += SLOT_WIDTH;
+        }
 
-        } while (y > 0);
-
-        B += 16;
-        CountX -= 16;
+        B += SLOT_WIDTH;
+        CountX -= SLOT_WIDTH;
     }
 
-    //
-    // Special case the handling of the remaining columns less than 16 elements
-    // wide.
-    //
-
+    // Handle remaining columns (< SLOT_WIDTH).
     if (CountX > 0) {
-
-        MLAS_FLOAT32X4 ZeroFloat32x4 = MlasZeroFloat32x4();
-
 #if defined(MLAS_NEON_INTRINSICS)
-        float32x4x4_t ZeroFloat32x4x4 = { ZeroFloat32x4, ZeroFloat32x4, ZeroFloat32x4, ZeroFloat32x4 };
-#endif
+        MLAS_FLOAT32X4 ZeroVec = MlasZeroFloat32x4();
+        float32x4x4_t ZeroSlot = { ZeroVec, ZeroVec, ZeroVec, ZeroVec };
 
-        size_t y = CountY;
-
-        do {
-
-            float* d = D;
-            const float* b = B;
-
-#if defined(MLAS_NEON_INTRINSICS)
-            vst4q_f32(d, ZeroFloat32x4x4);
-#else
-            MlasStoreAlignedFloat32x4(d, ZeroFloat32x4);
-            MlasStoreAlignedFloat32x4(d + 4, ZeroFloat32x4);
-            MlasStoreAlignedFloat32x4(d + 8, ZeroFloat32x4);
-            MlasStoreAlignedFloat32x4(d + 12, ZeroFloat32x4);
-#endif
-
-            if ((CountX & 8) != 0) {
-
-                MLAS_FLOAT32X4 t0 = MlasLoadFloat32x4(b);
-                MLAS_FLOAT32X4 t1 = MlasLoadFloat32x4(b + 4);
-
-                MlasStoreAlignedFloat32x4(d, t0);
-                MlasStoreAlignedFloat32x4(d + 4, t1);
-
-                d += 8;
-                b += 8;
-            }
-
-            if ((CountX & 4) != 0) {
-
-                MlasStoreAlignedFloat32x4(d, MlasLoadFloat32x4(b));
-
-                d += 4;
-                b += 4;
-            }
-
-            if ((CountX & 2) != 0) {
-
-                float t0 = b[0];
-                float t1 = b[1];
-
-                d[0] = t0;
-                d[1] = t1;
-
-                d += 2;
-                b += 2;
-            }
-
-            if ((CountX & 1) != 0) {
-                d[0] = b[0];
-            }
-
-            D += 16;
+        for (size_t y = 0; y < CountY; ++y) {
+            vst4q_f32(D, ZeroSlot);
+            D += SLOT_WIDTH;
             B += ldb;
-            y--;
-
-        } while (y > 0);
+        }
+#else
+        for (size_t y = 0; y < CountY; ++y) {
+            Store16Slot(D, B, CountX);
+            D += SLOT_WIDTH;
+            B += ldb;
+        }
+#endif
     }
 }
 

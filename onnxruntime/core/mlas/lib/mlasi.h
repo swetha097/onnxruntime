@@ -1690,6 +1690,479 @@ typedef float MLAS_FLOAT32X4 __attribute__ ((vector_size(16)));
 typedef int32_t MLAS_INT32X4 __attribute__ ((vector_size(16)));
 #endif
 
+/* 512-bit wide vector types (16 x float32 or 16 x int32) */
+#if defined(MLAS_AVX512F_INTRINSICS)
+typedef __m512 MLAS_FLOAT32X16;
+typedef __m512i MLAS_INT32X16;
+#else
+#if defined(_MSC_VER)
+typedef struct { float v[16]; } MLAS_FLOAT32X16;
+typedef struct { int32_t v[16]; } MLAS_INT32X16;
+#else
+typedef float MLAS_FLOAT32X16 __attribute__ ((vector_size(64)));
+typedef int32_t MLAS_INT32X16 __attribute__ ((vector_size(64)));
+#endif
+#endif
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasReinterpretAsInt32x16(MLAS_FLOAT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castps_si512(Vector);
+#elif defined(_MSC_VER)
+    MLAS_INT32X16 Result;
+    memcpy(&Result, &Vector, sizeof(Result));
+    return Result;
+#else
+    return MLAS_INT32X16(Vector);
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasCastToInt32x16(MLAS_FLOAT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_cvttps_epi32(Vector);
+#elif defined(_MSC_VER)
+    MLAS_INT32X16 Result;
+    const float* p = (const float*)&Vector;
+    for (int i = 0; i < 16; i++) {
+        Result.v[i] = int32_t(p[i]);
+    }
+    return Result;
+#else
+    return MLAS_INT32X16{int32_t(Vector[0]), int32_t(Vector[1]), int32_t(Vector[2]), int32_t(Vector[3]),
+                         int32_t(Vector[4]), int32_t(Vector[5]), int32_t(Vector[6]), int32_t(Vector[7]),
+                         int32_t(Vector[8]), int32_t(Vector[9]), int32_t(Vector[10]), int32_t(Vector[11]),
+                         int32_t(Vector[12]), int32_t(Vector[13]), int32_t(Vector[14]), int32_t(Vector[15])};
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasCastToFloat32x16(MLAS_INT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_cvtepi32_ps(Vector);
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 Result;
+    for (int i = 0; i < 16; i++) {
+        Result.v[i] = float(Vector.v[i]);
+    }
+    return Result;
+#else
+    return MLAS_FLOAT32X16{float(Vector[0]), float(Vector[1]), float(Vector[2]), float(Vector[3]),
+                           float(Vector[4]), float(Vector[5]), float(Vector[6]), float(Vector[7]),
+                           float(Vector[8]), float(Vector[9]), float(Vector[10]), float(Vector[11]),
+                           float(Vector[12]), float(Vector[13]), float(Vector[14]), float(Vector[15])};
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasBroadcastInt32x16(int32_t Value)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_set1_epi32(Value);
+#elif defined(_MSC_VER)
+    MLAS_INT32X16 Result;
+    for (int i = 0; i < 16; i++) Result.v[i] = Value;
+    return Result;
+#else
+    return MLAS_INT32X16{Value, Value, Value, Value, Value, Value, Value, Value,
+                         Value, Value, Value, Value, Value, Value, Value, Value};
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasLoadInt32x16(const int32_t* Buffer)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_loadu_si512((const void*)Buffer);
+#elif defined(_MSC_VER)
+    MLAS_INT32X16 Result;
+    memcpy(&Result, Buffer, sizeof(Result));
+    return Result;
+#else
+    return *((MLAS_INT32X16*)Buffer);
+#endif
+}
+
+MLAS_FORCEINLINE
+void
+MlasStoreInt32x16(int32_t* Buffer, MLAS_INT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    _mm512_storeu_si512((void*)Buffer, Vector);
+#else
+#if defined(_MSC_VER)
+    memcpy(Buffer, &Vector, sizeof(Vector));
+#else
+    *((MLAS_INT32X16*)Buffer) = Vector;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasAddInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_add_epi32(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] + Vector2.v[i];
+    return r;
+#else
+    return Vector1 + Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasSubtractInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_sub_epi32(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] - Vector2.v[i];
+    return r;
+#else
+    return Vector1 - Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasAndInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_and_si512(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] & Vector2.v[i];
+    return r;
+#else
+    return Vector1 & Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasOrInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_or_si512(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] | Vector2.v[i];
+    return r;
+#else
+    return Vector1 | Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasXorInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_xor_si512(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] ^ Vector2.v[i];
+    return r;
+#else
+    return Vector1 ^ Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasAndNotInt32x16(MLAS_INT32X16 VectorNot, MLAS_INT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_andnot_si512(VectorNot, Vector);
+#else
+#if defined(_MSC_VER)
+    MLAS_INT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = (~VectorNot.v[i]) & Vector.v[i];
+    return r;
+#else
+    return (~VectorNot) & Vector;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_INT32X16
+MlasBlendInt32x16(MLAS_INT32X16 Vector1, MLAS_INT32X16 Vector2, MLAS_INT32X16 Selection)
+{
+    return MlasOrInt32x16(MlasAndInt32x16(Vector2, Selection), MlasAndNotInt32x16(Selection, Vector1));
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasReinterpretAsFloat32x16(MLAS_INT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castsi512_ps(Vector);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 Result;
+    memcpy(&Result, &Vector, sizeof(Result));
+    return Result;
+#else
+    return MLAS_FLOAT32X16(Vector);
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasBroadcastFloat32x16(float Value)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_set1_ps(Value);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Value;
+    return r;
+#else
+    return MLAS_FLOAT32X16{Value, Value, Value, Value, Value, Value, Value, Value,
+                           Value, Value, Value, Value, Value, Value, Value, Value};
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasLoadFloat32x16(const float* Buffer)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_loadu_ps(Buffer);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    memcpy(&r, Buffer, sizeof(r));
+    return r;
+#else
+    return *((MLAS_FLOAT32X16*)Buffer);
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+void
+MlasStoreFloat32x16(float* Buffer, MLAS_FLOAT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    _mm512_storeu_ps(Buffer, Vector);
+#else
+#if defined(_MSC_VER)
+    memcpy(Buffer, &Vector, sizeof(Vector));
+#else
+    *((MLAS_FLOAT32X16*)Buffer) = Vector;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasAddFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_add_ps(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] + Vector2.v[i];
+    return r;
+#else
+    return Vector1 + Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasSubtractFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_sub_ps(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] - Vector2.v[i];
+    return r;
+#else
+    return Vector1 - Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasMultiplyFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_mul_ps(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] * Vector2.v[i];
+    return r;
+#else
+    return Vector1 * Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasMultiplyAddFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2, MLAS_FLOAT32X16 Vector3)
+{
+#if defined(MLAS_AVX512F_INTRINSICS) && defined(MLAS_FMA3_INTRINSICS)
+    return _mm512_fmadd_ps(Vector1, Vector2, Vector3);
+#elif defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_add_ps(_mm512_mul_ps(Vector1, Vector2), Vector3);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] * Vector2.v[i] + Vector3.v[i];
+    return r;
+#else
+    return Vector1 * Vector2 + Vector3;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasDivideFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_div_ps(Vector1, Vector2);
+#else
+#if defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Vector1.v[i] / Vector2.v[i];
+    return r;
+#else
+    return Vector1 / Vector2;
+#endif
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasAndFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(Vector1), _mm512_castps_si512(Vector2)));
+#else
+    return MlasReinterpretAsFloat32x16(MlasAndInt32x16(MlasReinterpretAsInt32x16(Vector1), MlasReinterpretAsInt32x16(Vector2)));
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasOrFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castsi512_ps(_mm512_or_si512(_mm512_castps_si512(Vector1), _mm512_castps_si512(Vector2)));
+#else
+    return MlasReinterpretAsFloat32x16(MlasOrInt32x16(MlasReinterpretAsInt32x16(Vector1), MlasReinterpretAsInt32x16(Vector2)));
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasXorFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(Vector1), _mm512_castps_si512(Vector2)));
+#else
+    return MlasReinterpretAsFloat32x16(MlasXorInt32x16(MlasReinterpretAsInt32x16(Vector1), MlasReinterpretAsInt32x16(Vector2)));
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasAndNotFloat32x16(MLAS_FLOAT32X16 VectorNot, MLAS_FLOAT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_castsi512_ps(_mm512_andnot_si512(_mm512_castps_si512(VectorNot), _mm512_castps_si512(Vector)));
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) {
+        uint32_t notv;
+        uint32_t val;
+        memcpy(&notv, &VectorNot.v[i], sizeof(notv));
+        memcpy(&val, &Vector.v[i], sizeof(val));
+        uint32_t out = (~notv) & val;
+        float outf;
+        memcpy(&outf, &out, sizeof(outf));
+        r.v[i] = outf;
+    }
+    return r;
+#else
+    return MlasReinterpretAsFloat32x16(MlasAndNotInt32x16(MlasReinterpretAsInt32x16(VectorNot), MlasReinterpretAsInt32x16(Vector)));
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasBlendFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2, MLAS_FLOAT32X16 Selection)
+{
+    return MlasOrFloat32x16(MlasAndFloat32x16(Vector2, Selection), MlasAndNotFloat32x16(Selection, Vector1));
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasMaximumFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_max_ps(Vector1, Vector2);
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = (Vector1.v[i] > Vector2.v[i]) ? Vector1.v[i] : Vector2.v[i];
+    return r;
+#else
+    return MlasBlendFloat32x16(Vector2, Vector1, Vector1 > Vector2);
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasMinimumFloat32x16(MLAS_FLOAT32X16 Vector1, MLAS_FLOAT32X16 Vector2)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_min_ps(Vector1, Vector2);
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = (Vector2.v[i] > Vector1.v[i]) ? Vector1.v[i] : Vector2.v[i];
+    return r;
+#else
+    return MlasBlendFloat32x16(Vector2, Vector1, Vector2 > Vector1);
+#endif
+}
+
 MLAS_FORCEINLINE
 MLAS_INT32X4
 MlasReinterpretAsInt32x4(MLAS_FLOAT32X4 Vector)
