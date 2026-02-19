@@ -190,6 +190,7 @@ function(setup_mlas_source_for_windows)
       "${MLAS_SRC_DIR}/intrinsics/avx/*.cpp"
     )
     set_source_files_properties(${mlas_platform_srcs_avx} PROPERTIES COMPILE_FLAGS "/arch:AVX")
+    set_source_files_properties(${MLAS_SRC_DIR}/sgemm.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX")
 
     file(GLOB_RECURSE mlas_platform_srcs_avx2 CONFIGURE_DEPENDS
       "${MLAS_SRC_DIR}/intrinsics/avx2/*.cpp"
@@ -198,6 +199,7 @@ function(setup_mlas_source_for_windows)
 
     target_sources(onnxruntime_mlas PRIVATE
       ${MLAS_SRC_DIR}/dgemm.cpp
+      ${MLAS_SRC_DIR}/sgemm.cpp
       ${mlas_platform_srcs_avx}
       ${mlas_platform_srcs_avx2}
       ${MLAS_SRC_DIR}/rotary_embedding_kernel_avx2.h

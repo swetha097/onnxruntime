@@ -312,14 +312,15 @@ Return Value:
             MlasStoreAlignedFloat32x4(d + 12, ZeroFloat32x4);
 #endif
 
+
             if ((CountX & 8) != 0) {
-
-                MLAS_FLOAT32X4 t0 = MlasLoadFloat32x4(b);
-                MLAS_FLOAT32X4 t1 = MlasLoadFloat32x4(b + 4);
-
-                MlasStoreAlignedFloat32x4(d, t0);
-                MlasStoreAlignedFloat32x4(d + 4, t1);
-
+#if defined(MLAS_AVX_INTRINSICS)
+                MLAS_FLOAT32X8 t = MlasLoadFloat32x8(b);
+                MlasStoreAlignedFloat32x8(d, t);
+#else
+                 MlasStoreAlignedFloat32x4(d, MlasLoadFloat32x4(b));
+                 MlasStoreAlignedFloat32x4(d + 4, MlasLoadFloat32x4(b + 4));
+#endif
                 d += 8;
                 b += 8;
             }

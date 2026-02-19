@@ -1690,6 +1690,18 @@ typedef float MLAS_FLOAT32X4 __attribute__ ((vector_size(16)));
 typedef int32_t MLAS_INT32X4 __attribute__ ((vector_size(16)));
 #endif
 
+#if defined(MLAS_AVX_INTRINSICS)
+typedef __m256 MLAS_FLOAT32X8;
+#elif defined(_MSC_VER)
+// MSVC doesn't support __attribute__((vector_size(...)))
+// Use a struct to represent the 256-bit vector for type definitions in headers
+typedef struct {
+    float f[8];
+} MLAS_FLOAT32X8;
+#else
+typedef float MLAS_FLOAT32X8 __attribute__ ((vector_size(32)));
+#endif
+
 MLAS_FORCEINLINE
 MLAS_INT32X4
 MlasReinterpretAsInt32x4(MLAS_FLOAT32X4 Vector)
@@ -2143,6 +2155,36 @@ MlasStoreLaneFloat32x4(float* Buffer, MLAS_FLOAT32X4 Vector)
     *Buffer = Vector[Lane];
 #endif
 }
+
+//
+// 256-bit (8 x float32) load and store operations
+//
+
+#if defined(MLAS_AVX_INTRINSICS)
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X8
+MlasLoadFloat32x8(const float* Buffer)
+{
+    return _mm256_loadu_ps(Buffer);
+}
+
+MLAS_FORCEINLINE
+void
+MlasStoreFloat32x8(float* Buffer, MLAS_FLOAT32X8 Vector)
+{
+    _mm256_storeu_ps(Buffer, Vector);
+}
+
+MLAS_FORCEINLINE
+void
+MlasStoreAlignedFloat32x8(float* Buffer, MLAS_FLOAT32X8 Vector)
+{
+    _mm256_store_ps(Buffer, Vector);
+}
+
+#endif
+
 
 MLAS_FORCEINLINE
 void
