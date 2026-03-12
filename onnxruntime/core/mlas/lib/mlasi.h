@@ -1657,6 +1657,9 @@ MlasConvDepthwiseFloat_CHW(
 #if defined(__AVX2__)
 #define MLAS_AVX2_INTRINSICS
 #endif
+#if defined(__AVX512F__)
+#define MLAS_AVX512F_INTRINSICS
+#endif
 #if defined(__FMA__) || (defined(_MSC_VER) && defined(__AVX2__))
 #define MLAS_FMA3_INTRINSICS
 #endif
@@ -1689,6 +1692,74 @@ typedef __m128i MLAS_INT32X4;
 typedef float MLAS_FLOAT32X4 __attribute__ ((vector_size(16)));
 typedef int32_t MLAS_INT32X4 __attribute__ ((vector_size(16)));
 #endif
+
+//
+// 256-bit wide vector types (8 x float32)
+//
+
+#if defined(MLAS_AVX_INTRINSICS)
+typedef __m256 MLAS_FLOAT32X8;
+#elif defined(_MSC_VER)
+typedef struct { float f[8]; } MLAS_FLOAT32X8;
+#else
+typedef float MLAS_FLOAT32X8 __attribute__ ((vector_size(32)));
+#endif
+
+//
+// 512-bit wide vector types (16 x float32)
+//
+
+#if defined(MLAS_AVX512F_INTRINSICS)
+typedef __m512 MLAS_FLOAT32X16;
+#elif defined(_MSC_VER)
+typedef struct { float v[16]; } MLAS_FLOAT32X16;
+#else
+typedef float MLAS_FLOAT32X16 __attribute__ ((vector_size(64)));
+#endif
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasBroadcastFloat32x16(float Value)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_set1_ps(Value);
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    for (int i = 0; i < 16; i++) r.v[i] = Value;
+    return r;
+#else
+    return MLAS_FLOAT32X16{Value, Value, Value, Value, Value, Value, Value, Value,
+                           Value, Value, Value, Value, Value, Value, Value, Value};
+#endif
+}
+
+MLAS_FORCEINLINE
+MLAS_FLOAT32X16
+MlasLoadFloat32x16(const float* Buffer)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    return _mm512_loadu_ps(Buffer);
+#elif defined(_MSC_VER)
+    MLAS_FLOAT32X16 r;
+    memcpy(&r, Buffer, sizeof(r));
+    return r;
+#else
+    return *((const MLAS_FLOAT32X16*)Buffer);
+#endif
+}
+
+MLAS_FORCEINLINE
+void
+MlasStoreFloat32x16(float* Buffer, MLAS_FLOAT32X16 Vector)
+{
+#if defined(MLAS_AVX512F_INTRINSICS)
+    _mm512_storeu_ps(Buffer, Vector);
+#elif defined(_MSC_VER)
+    memcpy(Buffer, &Vector, sizeof(Vector));
+#else
+    *((MLAS_FLOAT32X16*)Buffer) = Vector;
+#endif
+}
 
 MLAS_FORCEINLINE
 MLAS_INT32X4

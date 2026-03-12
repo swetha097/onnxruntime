@@ -251,6 +251,9 @@ Return Value:
     // Copy data from matrix B into the destination buffer 16 columns at a
     // time.
     //
+    // On AVX-512F a single 512-bit load+store covers the full 16-element slot.
+    // On NEON vld4q_f32/vst4q_f32 covers it. Otherwise 4 x 128-bit ops are used.
+    //
 
     while (CountX >= 16) {
 
@@ -261,15 +264,17 @@ Return Value:
 
 #if defined(MLAS_NEON_INTRINSICS)
             vst4q_f32(D, vld4q_f32(b));
+#elif defined(MLAS_AVX512F_INTRINSICS)
+            MlasStoreFloat32x16(D, MlasLoadFloat32x16(b));
 #else
             MLAS_FLOAT32X4 t0 = MlasLoadFloat32x4(&b[0]);
             MLAS_FLOAT32X4 t1 = MlasLoadFloat32x4(&b[4]);
             MLAS_FLOAT32X4 t2 = MlasLoadFloat32x4(&b[8]);
             MLAS_FLOAT32X4 t3 = MlasLoadFloat32x4(&b[12]);
 
-            MlasStoreAlignedFloat32x4(&D[0], t0);
-            MlasStoreAlignedFloat32x4(&D[4], t1);
-            MlasStoreAlignedFloat32x4(&D[8], t2);
+            MlasStoreAlignedFloat32x4(&D[0],  t0);
+            MlasStoreAlignedFloat32x4(&D[4],  t1);
+            MlasStoreAlignedFloat32x4(&D[8],  t2);
             MlasStoreAlignedFloat32x4(&D[12], t3);
 #endif
 
@@ -285,7 +290,7 @@ Return Value:
 
     //
     // Special case the handling of the remaining columns less than 16 elements
-    // wide.
+    // wide. Zero-fill the full 16-element slot first, then overwrite valid lanes.
     //
 
     if (CountX > 0) {
@@ -305,20 +310,24 @@ Return Value:
 
 #if defined(MLAS_NEON_INTRINSICS)
             vst4q_f32(d, ZeroFloat32x4x4);
+#elif defined(MLAS_AVX512F_INTRINSICS)
+            MlasStoreFloat32x16(d, MlasBroadcastFloat32x16(0.0f));
 #else
-            MlasStoreAlignedFloat32x4(d, ZeroFloat32x4);
-            MlasStoreAlignedFloat32x4(d + 4, ZeroFloat32x4);
-            MlasStoreAlignedFloat32x4(d + 8, ZeroFloat32x4);
+            MlasStoreAlignedFloat32x4(d,      ZeroFloat32x4);
+            MlasStoreAlignedFloat32x4(d +  4, ZeroFloat32x4);
+            MlasStoreAlignedFloat32x4(d +  8, ZeroFloat32x4);
             MlasStoreAlignedFloat32x4(d + 12, ZeroFloat32x4);
 #endif
 
+#if !defined(MLAS_NEON_INTRINSICS)
             if ((CountX & 8) != 0) {
 
-                MLAS_FLOAT32X4 t0 = MlasLoadFloat32x4(b);
-                MLAS_FLOAT32X4 t1 = MlasLoadFloat32x4(b + 4);
-
-                MlasStoreAlignedFloat32x4(d, t0);
-                MlasStoreAlignedFloat32x4(d + 4, t1);
+#if defined(MLAS_AVX_INTRINSICS)
+                MlasStoreAlignedFloat32x8(d, MlasLoadFloat32x8(b));
+#else
+                MlasStoreAlignedFloat32x4(d,     MlasLoadFloat32x4(b));
+                MlasStoreAlignedFloat32x4(d + 4, MlasLoadFloat32x4(b + 4));
+#endif
 
                 d += 8;
                 b += 8;
@@ -347,6 +356,7 @@ Return Value:
             if ((CountX & 1) != 0) {
                 d[0] = b[0];
             }
+#endif  // !MLAS_NEON_INTRINSICS
 
             D += 16;
             B += ldb;
