@@ -479,6 +479,15 @@ void
     );
 
 typedef
+void
+(MLASCALL MLAS_TRANSPOSE_FLOAT32X16X4_KERNEL)(
+    const float* S,
+    float* D,
+    size_t GatherStride,
+    size_t ScatterStride
+    );
+
+typedef
 size_t
 (MLASCALL MLAS_GEMM_U8S8_KERNEL)(
     const uint8_t* A,
@@ -1137,6 +1146,7 @@ extern "C" {
     MLAS_QUANTIZE_LINEAR_U8_KERNEL MlasQuantizeLinearU8KernelAvx512F;
     MLAS_COMPUTE_UNARY_FLOAT_KERNEL MlasGeluErfKernelAvx512F;
     MLAS_COMPUTE_UNARY_FLOAT_KERNEL MlasSiluKernelAvx512F;
+    MLAS_TRANSPOSE_FLOAT32X16X4_KERNEL MlasTransposeFloat32x16x4KernelAvx512F;
 #endif
 
     MLAS_REDUCE_MAXIMUM_FLOAT_KERNEL MlasReduceMaximumF32Kernel;
@@ -1542,6 +1552,9 @@ struct MLAS_PLATFORM {
     const MLAS_HGEMM_DISPATCH* HGemmDispatch{nullptr};
     const MLAS_SOFTMAX_DISPATCH* SoftmaxDispatch{nullptr};
     const MLAS_ELTWISE_DISPATCH* EltwiseDispatch{nullptr};
+#if defined(MLAS_TARGET_AMD64)
+    MLAS_TRANSPOSE_FLOAT32X16X4_KERNEL* TransposeFloat32x16x4Kernel{nullptr};
+#endif
 };
 
 inline
