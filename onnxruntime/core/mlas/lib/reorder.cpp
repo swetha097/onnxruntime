@@ -17,6 +17,7 @@ Abstract:
 --*/
 
 #include "mlasi.h"
+#include <cstdio>
 
 //
 // Define the parameters to execute segments of a NCHW output reordering
@@ -60,7 +61,13 @@ Return Value:
 
 --*/
 {
-#if defined(MLAS_SSE41_INTRINSICS)
+#if defined(MLAS_AVX2_INTRINSICS)
+    (void)printed_avx2;
+    const int gs = static_cast<int>(GatherStride);
+    __m128i vindex = _mm_set_epi32(3 * gs, 2 * gs, gs, 0);
+    __m128 v = _mm_i32gather_ps(S, vindex, 4);
+    _mm_storeu_ps(D, v);
+#elif defined(MLAS_SSE41_INTRINSICS)
     __m128 v = _mm_load_ss(&S[0 * GatherStride]);
     v = _mm_insert_ps(v, _mm_load_ss(&S[1 * GatherStride]), 0x10);
     v = _mm_insert_ps(v, _mm_load_ss(&S[2 * GatherStride]), 0x20);
