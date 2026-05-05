@@ -161,7 +161,38 @@ Return Value:
 
 --*/
 {
-#if defined(MLAS_SSE2_INTRINSICS)
+#if defined(MLAS_AVX2_INTRINSICS)
+    // Load rows into 256-bit registers: lane0=row0, lane1=row1 and lane0=row2, lane1=row3
+    __m256 row01 = _mm256_castps128_ps256(_mm_loadu_ps(&S[GatherStride * 0]));
+    row01 = _mm256_insertf128_ps(row01, _mm_loadu_ps(&S[GatherStride * 1]), 1);
+    __m256 row23 = _mm256_castps128_ps256(_mm_loadu_ps(&S[GatherStride * 2]));
+    row23 = _mm256_insertf128_ps(row23, _mm_loadu_ps(&S[GatherStride * 3]), 1);
+
+    // Regroup so even rows share one register and odd rows share the other:
+    // r02: lane0=row0 [a b c d], lane1=row2 [i j k l]
+    // r13: lane0=row1 [e f g h], lane1=row3 [m n o p]
+    __m256 r02 = _mm256_permute2f128_ps(row01, row23, 0x20);
+    __m256 r13 = _mm256_permute2f128_ps(row01, row23, 0x31);
+
+    // Interleave within each 128-bit lane:
+    // t0: lane0=[a e b f], lane1=[i m j n]
+    // t1: lane0=[c g d h], lane1=[k o l p]
+    __m256 t0 = _mm256_unpacklo_ps(r02, r13);
+    __m256 t1 = _mm256_unpackhi_ps(r02, r13);
+
+    // Cross-lane shuffle: pick elements 0,1 then 2,3 from each lane pair.
+    // col0 = [a e i m], col1 = [b f j n], col2 = [c g k o], col3 = [d h l p]
+    __m128 col0 = _mm_shuffle_ps(_mm256_castps256_ps128(t0), _mm256_extractf128_ps(t0, 1), _MM_SHUFFLE(1, 0, 1, 0));
+    __m128 col1 = _mm_shuffle_ps(_mm256_castps256_ps128(t0), _mm256_extractf128_ps(t0, 1), _MM_SHUFFLE(3, 2, 3, 2));
+    __m128 col2 = _mm_shuffle_ps(_mm256_castps256_ps128(t1), _mm256_extractf128_ps(t1, 1), _MM_SHUFFLE(1, 0, 1, 0));
+    __m128 col3 = _mm_shuffle_ps(_mm256_castps256_ps128(t1), _mm256_extractf128_ps(t1, 1), _MM_SHUFFLE(3, 2, 3, 2));
+
+    // Store the transposed results
+    _mm_storeu_ps(&D[ScatterStride * 0], col0);
+    _mm_storeu_ps(&D[ScatterStride * 1], col1);
+    _mm_storeu_ps(&D[ScatterStride * 2], col2);
+    _mm_storeu_ps(&D[ScatterStride * 3], col3);
+#elif defined(MLAS_SSE2_INTRINSICS)
     MLAS_FLOAT32X4 v[4];
     MLAS_FLOAT32X4 t[4];
 
@@ -215,7 +246,68 @@ Return Value:
     MlasReorderScatterFloat32x4(&S[GatherStride * 2], &D[2], ScatterStride);
     MlasReorderScatterFloat32x4(&S[GatherStride * 3], &D[3], ScatterStride);
 #endif
+
 }
+
+#if defined(MLAS_AVX2_INTRINSICS)
+MLAS_FORCEINLINE
+void
+MlasReorderTransposeFloat32x4x8AVX2(
+    const float* S,
+    float* D,
+    size_t GatherStride,
+    size_t ScatterStride
+    )
+//
+// Transposes a 4x8 block: 4 rows of 8 floats each -> 8 output vectors of 4 floats.
+// Replaces two consecutive MlasReorderTransposeFloat32x4x8 calls when BlockSize==8.
+//
+// Uses _mm256_loadu_ps to load each full 8-float row in one 256-bit instruction,
+// eliminating the insertf128 + permute2f128 overhead of the 4x4 path.
+//
+// Instruction count: 4 loads + 4 unpacks + 4 shuffles + 8 stores = 20
+// vs two 4x4 calls:  8 loads + 4 inserts + 4 permutes + 4 unpacks + 8 shuffles + 8 stores = 36
+//
+{
+    // Load each full row (8 floats) into a 256-bit register.
+    // lane0 = columns 0-3, lane1 = columns 4-7.
+    __m256 r0 = _mm256_loadu_ps(&S[GatherStride * 0]);
+    __m256 r1 = _mm256_loadu_ps(&S[GatherStride * 1]);
+    __m256 r2 = _mm256_loadu_ps(&S[GatherStride * 2]);
+    __m256 r3 = _mm256_loadu_ps(&S[GatherStride * 3]);
+
+    // Interleave row pairs within each 128-bit lane simultaneously.
+    // t0 lane0=[r0[0],r1[0],r0[1],r1[1]]  lane1=[r0[4],r1[4],r0[5],r1[5]]
+    // t1 lane0=[r0[2],r1[2],r0[3],r1[3]]  lane1=[r0[6],r1[6],r0[7],r1[7]]
+    // t2 lane0=[r2[0],r3[0],r2[1],r3[1]]  lane1=[r2[4],r3[4],r2[5],r3[5]]
+    // t3 lane0=[r2[2],r3[2],r2[3],r3[3]]  lane1=[r2[6],r3[6],r2[7],r3[7]]
+    __m256 t0 = _mm256_unpacklo_ps(r0, r1);
+    __m256 t1 = _mm256_unpackhi_ps(r0, r1);
+    __m256 t2 = _mm256_unpacklo_ps(r2, r3);
+    __m256 t3 = _mm256_unpackhi_ps(r2, r3);
+
+    // Shuffle to assemble complete columns.
+    // Each 256-bit result holds two output columns: lane0=col_i, lane1=col_(i+4).
+    // u0: lane0=[r0[0],r1[0],r2[0],r3[0]] lane1=[r0[4],r1[4],r2[4],r3[4]]
+    // u1: lane0=[r0[1],r1[1],r2[1],r3[1]] lane1=[r0[5],r1[5],r2[5],r3[5]]
+    // u2: lane0=[r0[2],r1[2],r2[2],r3[2]] lane1=[r0[6],r1[6],r2[6],r3[6]]
+    // u3: lane0=[r0[3],r1[3],r2[3],r3[3]] lane1=[r0[7],r1[7],r2[7],r3[7]]
+    __m256 u0 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(1, 0, 1, 0));
+    __m256 u1 = _mm256_shuffle_ps(t0, t2, _MM_SHUFFLE(3, 2, 3, 2));
+    __m256 u2 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(1, 0, 1, 0));
+    __m256 u3 = _mm256_shuffle_ps(t1, t3, _MM_SHUFFLE(3, 2, 3, 2));
+
+    // Store lane0 as columns 0-3, lane1 as columns 4-7.
+    _mm_storeu_ps(&D[ScatterStride * 0], _mm256_castps256_ps128(u0));
+    _mm_storeu_ps(&D[ScatterStride * 1], _mm256_castps256_ps128(u1));
+    _mm_storeu_ps(&D[ScatterStride * 2], _mm256_castps256_ps128(u2));
+    _mm_storeu_ps(&D[ScatterStride * 3], _mm256_castps256_ps128(u3));
+    _mm_storeu_ps(&D[ScatterStride * 4], _mm256_extractf128_ps(u0, 1));
+    _mm_storeu_ps(&D[ScatterStride * 5], _mm256_extractf128_ps(u1, 1));
+    _mm_storeu_ps(&D[ScatterStride * 6], _mm256_extractf128_ps(u2, 1));
+    _mm_storeu_ps(&D[ScatterStride * 7], _mm256_extractf128_ps(u3, 1));
+}
+#endif
 
 void
 MLASCALL
@@ -512,6 +604,16 @@ Return Value:
             float* dd = d;
             size_t bc = 0;
 
+#if defined(MLAS_AVX2_INTRINSICS)
+            // Process 8 output channels at once when possible.
+            // Each call loads full 8-float rows with _mm256_loadu_ps, avoiding the
+            // insertf128 + permute2f128 overhead of two separate 4x4 calls.
+            for (; bc + 8 <= AlignedOutputChannelsThisIteration; bc += 8) {
+                MlasReorderTransposeFloat32x4x8AVX2(ss, dd, BlockSize, OutputSize);
+                ss += 8;
+                dd += 8 * OutputSize;
+            }
+#endif
             for (; bc < AlignedOutputChannelsThisIteration; bc += 4) {
                 MlasReorderTransposeFloat32x4x4(ss, dd, BlockSize, OutputSize);
                 ss += 4;
