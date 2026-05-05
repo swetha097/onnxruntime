@@ -512,6 +512,15 @@ Return Value:
             float* dd = d;
             size_t bc = 0;
 
+#if defined(MLAS_TARGET_AMD64)
+            auto* wt16 = GetMlasPlatform().TransposeFloat32x16x4Kernel;
+            if (wt16 && AlignedOutputChannelsThisIteration == 16) {
+                wt16(ss, dd, BlockSize, OutputSize);
+                bc = 16;
+                ss += 16;
+                dd += 16 * OutputSize;
+            } else
+#endif
             for (; bc < AlignedOutputChannelsThisIteration; bc += 4) {
                 MlasReorderTransposeFloat32x4x4(ss, dd, BlockSize, OutputSize);
                 ss += 4;
