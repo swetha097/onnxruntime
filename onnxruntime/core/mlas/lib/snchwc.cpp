@@ -16,6 +16,9 @@ Abstract:
 --*/
 
 #include "mlasi.h"
+#if defined(PROFILING_MODE_AVX512_CPP)
+#include "SconvKernelAvx512F_cpp.h"
+#endif
 
 //
 // Define the base thread context for NCWHc convolution or pooling operations.
@@ -70,9 +73,11 @@ struct MLAS_NCHWC_POOL_WORK_BLOCK : MLAS_NCHWC_WORK_BLOCK
 // Define the convolution kernel flags.
 //
 
+#ifndef MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT
 #define MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT     0x00000001
 #define MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION         0x00000002
 #define MLAS_CONV_KERNEL_FLAG_RELU_ACTIVATION       0x00000004
+#endif
 #define MLAS_CONV_KERNEL_FLAG_OTHER_ACTIVATION      0x00000008
 
 size_t
@@ -674,10 +679,15 @@ struct MLAS_NCHWC_CONV_NCHWC_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
 
         const size_t BlockedOutputWidth = BlockSize * OutputWidth;
 
+#if defined(PROFILING_MODE_AVX512_CPP)
+        // Use C++ intrinsics implementation for profiling
+        MLAS_CONV_FLOAT_KERNEL* Kernel = MlasConvNchwcFloatKernelAvx512F_Cpp;
+#else
 #if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || (defined(MLAS_TARGET_ARM64) && defined(MLAS_USE_ARM_NEON_NCHWC))
         MLAS_CONV_FLOAT_KERNEL* Kernel = GetMlasPlatform().ConvNchwcFloatKernel;
 #else
         MLAS_CONV_FLOAT_KERNEL* Kernel = MlasConvNchwcFloatKernel;
+#endif
 #endif
 
         while (WorkRemaining > 0) {
@@ -879,10 +889,18 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
         const size_t FilterStrideBytes = BlockSize * InputChannels * sizeof(float);
         const size_t OutputStrideBytes = BlockSize * OutputSize * sizeof(float);
 
+#if defined(PROFILING_MODE_AVX512_CPP)
+printf("Using C++ intrinsics implementation for profiling\n");
+        // Use C++ intrinsics implementation for profiling
+        MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = MlasConvPointwiseFloatKernelAvx512F_Cpp;
+#else
 #if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || (defined(MLAS_TARGET_ARM64) && defined(MLAS_USE_ARM_NEON_NCHWC))
+        printf("Using platform kernel for profiling\n");
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = GetMlasPlatform().ConvPointwiseFloatKernel;
 #else
+        printf("Using fallback kernel for profiling\n");
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = MlasConvPointwiseFloatKernel;
+#endif
 #endif
 
         while (WorkRemaining > 0) {

@@ -918,3 +918,16 @@ if (NOT onnxruntime_ORT_MINIMAL_BUILD)
   endif()
 
 endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AVX-512 C++ Intrinsics Profiling Mode
+# Pass -DPROFILING_MODE_AVX512_CPP to the build to enable the C++ intrinsics
+# implementation of the NCHWc / Pointwise kernels instead of the assembly ones.
+# This is used for profiling and debugging purposes.
+# ─────────────────────────────────────────────────────────────────────────────
+if (DEFINED PROFILING_MODE_AVX512_CPP OR "${CMAKE_CXX_FLAGS}" MATCHES "PROFILING_MODE_AVX512_CPP")
+  message(STATUS "PROFILING_MODE_AVX512_CPP: Enabling C++ intrinsics AVX-512 kernel dispatch")
+  foreach(mlas_target ${ONNXRUNTIME_MLAS_LIBS})
+    target_compile_definitions(${mlas_target} PRIVATE PROFILING_MODE_AVX512_CPP)
+  endforeach()
+endif()
