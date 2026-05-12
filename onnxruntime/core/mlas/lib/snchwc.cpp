@@ -890,7 +890,7 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
         const size_t OutputStrideBytes = BlockSize * OutputSize * sizeof(float);
 
 #if defined(PROFILING_MODE_AVX512_CPP)
-printf("Using C++ intrinsics implementation for profiling\n");
+// printf("Using C++ intrinsics implementation for profiling\n");
         // Use C++ intrinsics implementation for profiling
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = MlasConvPointwiseFloatKernelAvx512F_Cpp;
 #else
@@ -898,7 +898,7 @@ printf("Using C++ intrinsics implementation for profiling\n");
         printf("Using platform kernel for profiling\n");
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = GetMlasPlatform().ConvPointwiseFloatKernel;
 #else
-        printf("Using fallback kernel for profiling\n");
+        // printf("Using fallback kernel for profiling\n");
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = MlasConvPointwiseFloatKernel;
 #endif
 #endif
@@ -1243,8 +1243,8 @@ MlasNchwcConv(
     const MLAS_ACTIVATION* Activation,
     bool ZeroMode,
     MLAS_THREADPOOL* ThreadPool,
-    const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* BackendKernelSelectorConfig,
-    bool UseBf16
+    const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* /* BackendKernelSelectorConfig */,
+    bool /* UseBf16 */
     )
 /*++
 
@@ -1296,9 +1296,6 @@ Return Value:
 --*/
 {
     MLAS_NCHWC_CONV_WORK_BLOCK WorkBlock;
-
-    (void)BackendKernelSelectorConfig;
-    (void)UseBf16;
 
     //
     // Capture the convolution specific parameters to the work block.

@@ -1522,6 +1522,41 @@ MlasGemmBatch(
         GetMlasPlatform().MlasSGemmBatchOverride(TransA, TransB, M, N, K, Data, BatchSize, ThreadPool)){
         return;
     }
+
+    //
+    // Prepack matrix B once for large single-batch SGEMM invocations to reduce
+    // repeated panel copy/transpose overhead inside MlasSgemmOperation.
+    //
+
+    const MLAS_SGEMM_DATA_PARAMS* EffectiveData = Data;
+    MLAS_SGEMM_DATA_PARAMS PackedData;
+
+    if (BatchSize == 1 &&
+        Data != nullptr &&
+        !Data[0].BIsPacked &&
+        Data[0].B != nullptr &&
+        // Keep this conservative so we only prepack when there is enough work
+        // to amortize packing overhead.
+        M >= 4 && N >= 64 && K >= 64) {
+
+        const size_t PackedBSize =
+            MlasGemmPackBSize(TransA, TransB, N, K, BackendKernelSelectorConfig);
+
+        if (PackedBSize > 0) {
+            MlasThreadedBufAlloc(PackedBSize);
+            if (ThreadedBufHolder.get() != nullptr) {
+                MlasGemmPackB(TransA, TransB, N, K, Data[0].B, Data[0].ldb,
+                              ThreadedBufHolder.get(), BackendKernelSelectorConfig);
+
+                PackedData = Data[0];
+                PackedData.B = reinterpret_cast<const float*>(ThreadedBufHolder.get());
+                PackedData.ldb = 0;
+                PackedData.BIsPacked = true;
+                EffectiveData = &PackedData;
+            }
+        }
+    }
+
     //
     // Compute the number of target threads given the complexity of the SGEMM
     // operation. Small requests should run using the single threaded path.
@@ -1576,7 +1611,7 @@ MlasGemmBatch(
         ptrdiff_t GemmIdx = tid / ThreadsPerGemm;
         ptrdiff_t ThreadIdx = tid % ThreadsPerGemm;
         MlasSgemmThreaded(ThreadCountM, ThreadCountN,
-            TransA, TransB, M, N, K, &(Data[GemmIdx]), ThreadIdx);
+            TransA, TransB, M, N, K, &(EffectiveData[GemmIdx]), ThreadIdx);
     });
 }
 #if defined(_MSC_VER) && !defined(__clang__)

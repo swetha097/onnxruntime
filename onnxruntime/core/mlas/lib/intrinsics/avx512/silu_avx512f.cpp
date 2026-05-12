@@ -105,6 +105,56 @@ MlasComputeSiluVectorAvx512(
 
 void
 MLASCALL
+MlasComputeLogisticF32KernelAvx512F(
+    const float* Input,
+    float* Output,
+    size_t N
+    )
+{
+    const SiluAvx512BroadcastConstants Constants;
+    size_t Offset = 0;
+
+    while (Offset + 32 <= N) {
+        const __m512 X0 = _mm512_loadu_ps(Input + Offset);
+        const __m512 X1 = _mm512_loadu_ps(Input + Offset + 16);
+        __m512 Result0 = MlasLogisticApproxAvx512(X0, Constants);
+        __m512 Result1 = MlasLogisticApproxAvx512(X1, Constants);
+
+        const __mmask16 NaNMask0 = _mm512_cmp_ps_mask(X0, X0, _CMP_UNORD_Q);
+        const __mmask16 NaNMask1 = _mm512_cmp_ps_mask(X1, X1, _CMP_UNORD_Q);
+        Result0 = _mm512_mask_mov_ps(Result0, NaNMask0, X0);
+        Result1 = _mm512_mask_mov_ps(Result1, NaNMask1, X1);
+
+        _mm512_storeu_ps(Output + Offset, Result0);
+        _mm512_storeu_ps(Output + Offset + 16, Result1);
+        Offset += 32;
+    }
+
+    while (Offset + 16 <= N) {
+        const __m512 X = _mm512_loadu_ps(Input + Offset);
+        __m512 Result = MlasLogisticApproxAvx512(X, Constants);
+
+        const __mmask16 NaNMask = _mm512_cmp_ps_mask(X, X, _CMP_UNORD_Q);
+        Result = _mm512_mask_mov_ps(Result, NaNMask, X);
+
+        _mm512_storeu_ps(Output + Offset, Result);
+        Offset += 16;
+    }
+
+    if (Offset < N) {
+        const __mmask16 TailMask = static_cast<__mmask16>((1u << (N - Offset)) - 1u);
+        const __m512 X = _mm512_maskz_loadu_ps(TailMask, Input + Offset);
+        __m512 Result = MlasLogisticApproxAvx512(X, Constants);
+
+        const __mmask16 NaNMask = _mm512_cmp_ps_mask(X, X, _CMP_UNORD_Q);
+        Result = _mm512_mask_mov_ps(Result, NaNMask, X);
+
+        _mm512_mask_storeu_ps(Output + Offset, TailMask, Result);
+    }
+}
+
+void
+MLASCALL
 MlasSiluKernelAvx512F(
     const float* Input,
     float* Output,

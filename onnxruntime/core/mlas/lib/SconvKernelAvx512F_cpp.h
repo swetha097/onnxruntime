@@ -340,7 +340,7 @@ static void ProcessNchwcSingleOutput(
         }
 
         row_input = reinterpret_cast<const float*>(
-            reinterpret_cast<const char*>(row_input) + dilated_input_width);
+            reinterpret_cast<const char*>(col_input) + input_stride);
         row_input_base = reinterpret_cast<const float*>(
             reinterpret_cast<const char*>(row_input_base) + dilated_input_width);
         row_filter = col_filter;

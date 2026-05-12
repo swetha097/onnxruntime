@@ -917,6 +917,10 @@ foreach(mlas_target ${ONNXRUNTIME_MLAS_LIBS})
     set_target_properties(${mlas_target} PROPERTIES FOLDER "ONNXRuntime")
 endforeach()
 
+if(PROFILING_MODE_AVX512_CPP)
+  target_compile_definitions(onnxruntime_mlas PRIVATE PROFILING_MODE_AVX512_CPP)
+endif()
+
 if (WIN32)
   target_compile_options(onnxruntime_mlas PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/wd6385>" "$<$<COMPILE_LANGUAGE:CXX>:/wd4127>")
   if (onnxruntime_ENABLE_STATIC_ANALYSIS)
