@@ -180,26 +180,21 @@ static SCONV_FORCEINLINE void ComputeNchwcBlock(
     size_t filter_stride)
 {
     for (int i = 0; i < AVX512_BS; i++) {
-        // ── [LOAD-INPUT] Broadcast input channel 'i' for each output column ──
-        // Assembly uses zmm26..zmm31 for OC=1..6 respectively.
-        // For FC==1 && OC==1, assembly emits DWORD BCST embedded in the FMA.
-        __m512 in_bc[OC];
-        for (int o = 0; o < OC; o++) {
-            const float* p = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
-            in_bc[o] = _mm512_set1_ps(*p);  // [LOAD-INPUT] vbroadcastss from 4 bytes
-        }
-
-        // ── [LOAD-FILTER + FMA] Load 16oc weights and accumulate ──
-        // Assembly uses zmm24 as the reused filter vector (scratch register).
-        // For FC>1, filter rows are accessed as rdx, rdx+rsi, rbx, rbx+rsi.
+        // ── [LOAD-FILTER + FMA] f-outer: filter loaded once per (f,i), reused for all OC ──
+        // in_bc[] array eliminated — broadcast inlined directly into _mm512_fmadd_ps.
+        // Compiler emits: vfmadd231ps zmm_acc, zmm_fvec, [mem]{1to16}  (embedded DWORD BCST)
+        // Register pressure reduced: FC=4,OC=6 was 24 acc+6 in_bc+1 filter=31 ZMMs,
+        //                            now 24 acc+1 filter=25 ZMMs — no register spills.
         for (int f = 0; f < FC; f++) {
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_base) + f * filter_stride)
                 + i * AVX512_BS;
             const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] vmovups 64 bytes
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
+            for (int o = 0; o < OC; o++) {
+                const float* p = reinterpret_cast<const float*>(
+                    reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
+                acc[f][o] = _mm512_fmadd_ps(fvec, _mm512_set1_ps(*p), acc[f][o]);  // [FMA+BCST]
+            }
         }
     }
 }
@@ -551,20 +546,18 @@ static SCONV_FORCEINLINE void ComputePointwiseBlock(
     // Identical inner loop to NCHWc — the assembly uses the same ComputeBlock
     // macro for KernelType=Pointwise with BlockSize=16.
     for (int i = 0; i < AVX512_BS; i++) {
-        __m512 in_bc[OC];
-        for (int o = 0; o < OC; o++) {
-            const float* p = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
-            in_bc[o] = _mm512_set1_ps(*p);  // [LOAD-INPUT] 4 bytes per output col
-        }
-
+        // in_bc[] array eliminated — f-outer, broadcast inlined into FMA.
+        // Compiler emits: vfmadd231ps zmm_acc, zmm_fvec, [mem]{1to16}  (embedded DWORD BCST)
         for (int f = 0; f < FC; f++) {
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_block) + f * filter_stride)
                 + i * AVX512_BS;
             const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] 64 bytes
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
+            for (int o = 0; o < OC; o++) {
+                const float* p = reinterpret_cast<const float*>(
+                    reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
+                acc[f][o] = _mm512_fmadd_ps(fvec, _mm512_set1_ps(*p), acc[f][o]);  // [FMA+BCST]
+            }
         }
     }
 }
