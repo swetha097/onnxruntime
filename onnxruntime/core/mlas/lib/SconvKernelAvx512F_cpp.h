@@ -108,40 +108,27 @@ static void Avx512PostProcess(
     const float* bias,
     unsigned flags)
 {
-    // [LOAD-OUTPUT] Optional accumulate — vaddps with existing output values
-    if (flags & MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT) {
-        for (int f = 0; f < FC; f++) {
-            const float* row = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(out_ptr) + f * out_stride);
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_add_ps(acc[f][o],
-                    _mm512_loadu_ps(row + o * AVX512_BS));  // [LOAD-OUTPUT]
-        }
-    }
+    const bool do_accum = (flags & MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT) != 0;
+    const bool do_bias  = (flags & MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION)     != 0;
+    const bool do_relu  = (flags & MLAS_CONV_KERNEL_FLAG_RELU_ACTIVATION)   != 0;
+    const __m512 zero   = _mm512_setzero_ps();
+    const __m512 one    = _mm512_set1_ps(1.0f);
 
-    // [LOAD-BIAS] Optional bias addition — one vmovups + vaddps per filter row
-    if (flags & MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION) {
-        for (int f = 0; f < FC; f++) {
-            __m512 bvec = _mm512_loadu_ps(bias + f * AVX512_BS);  // [LOAD-BIAS]
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_add_ps(acc[f][o], bvec);
-        }
-    }
-
-    // Optional ReLU — vmaxps zmm, zmm_zero, zmm_acc
-    if (flags & MLAS_CONV_KERNEL_FLAG_RELU_ACTIVATION) {
-        const __m512 zero = _mm512_setzero_ps();
-        for (int f = 0; f < FC; f++)
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_max_ps(zero, acc[f][o]);  // [RELU]
-    }
-
-    // [STORE-OUTPUT] vmovups to output buffer, advancing r8 by OC*16*sizeof(float)
     for (int f = 0; f < FC; f++) {
         float* row = reinterpret_cast<float*>(
             reinterpret_cast<char*>(out_ptr) + f * out_stride);
-        for (int o = 0; o < OC; o++)
-            _mm512_storeu_ps(row + o * AVX512_BS, acc[f][o]);  // [STORE-OUTPUT]
+        // Bias loaded once per filter row; zero when bias is inactive
+        const __m512 bvec = do_bias ? _mm512_loadu_ps(bias + f * AVX512_BS)  // [LOAD-BIAS]
+                                    : _mm512_setzero_ps();
+        for (int o = 0; o < OC; o++) {
+            // Fuse bias + accumulate into one FMA when both flags are active:
+            //   acc = 1.0 * existing_output + (acc + bias)
+            // Emits: vfmadd231ps zmm_acc, zmm_one, [output]  (when both active)
+            __m512 v = do_bias ? _mm512_add_ps(acc[f][o], bvec) : acc[f][o];
+            if (do_accum) v = _mm512_fmadd_ps(one, _mm512_loadu_ps(row + o * AVX512_BS), v);  // [LOAD-OUTPUT + FMA]
+            if (do_relu)  v = _mm512_max_ps(zero, v);  // [RELU]
+            _mm512_storeu_ps(row + o * AVX512_BS, v);  // [STORE-OUTPUT]
+        }
     }
 }
 
