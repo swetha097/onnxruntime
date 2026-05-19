@@ -251,6 +251,10 @@ static void ProcessNchwcOutputs(
         const float* col_filter = row_filter;
 
         for (size_t kc = 0; kc < kernel_width; kc++) {
+            // Prefetch next filter tile into L1 (T0) and next input block into L2 (T1)
+            _mm_prefetch(reinterpret_cast<const char*>(col_filter) + AVX512_BS * AVX512_BS * sizeof(float), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(col_input)  + dilation_width, _MM_HINT_T1);
+
             // Inner unrolled loop over 16 input channel indices
             // (mirrors "IRP Index, <0,1,...,15>" in assembly)
             ComputeNchwcBlock<FC, OC>(acc, col_input, stride_width, col_filter, filter_stride);
@@ -612,6 +616,10 @@ static void ProcessPointwiseOutputs(
     // Outer loop: iterate over input channel blocks
     // Each iteration processes one 16i×16o filter tile
     for (size_t ch = 0; ch < input_channels; ch++) {
+        // Prefetch next filter tile into L1 (T0) and next input block into L2 (T1)
+        _mm_prefetch(reinterpret_cast<const char*>(cur_filter) + AVX512_BS * AVX512_BS * sizeof(float), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(cur_input)  + input_stride, _MM_HINT_T1);
+
         ComputePointwiseBlock<FC, OC>(acc, cur_input, stride_width, cur_filter, filter_stride);
 
         // Advance input to next channel block (InputStride bytes)
