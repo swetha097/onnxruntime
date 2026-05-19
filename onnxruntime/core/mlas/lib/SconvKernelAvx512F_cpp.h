@@ -197,7 +197,7 @@ static SCONV_FORCEINLINE void ComputeNchwcBlock(
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_base) + f * filter_stride)
                 + i * AVX512_BS;
-            const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] vmovups 64 bytes
+            const __m512 fvec = _mm512_load_ps(fp);   // [LOAD-FILTER] vmovaps 64 bytes (64-byte aligned tile)
             for (int o = 0; o < OC; o++)
                 acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
         }
@@ -562,7 +562,7 @@ static SCONV_FORCEINLINE void ComputePointwiseBlock(
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_block) + f * filter_stride)
                 + i * AVX512_BS;
-            const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] 64 bytes
+            const __m512 fvec = _mm512_load_ps(fp);   // [LOAD-FILTER] vmovaps 64 bytes (64-byte aligned tile)
             for (int o = 0; o < OC; o++)
                 acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
         }
