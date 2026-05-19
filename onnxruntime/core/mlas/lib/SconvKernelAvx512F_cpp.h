@@ -108,40 +108,25 @@ static void Avx512PostProcess(
     const float* bias,
     unsigned flags)
 {
-    // [LOAD-OUTPUT] Optional accumulate — vaddps with existing output values
-    if (flags & MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT) {
-        for (int f = 0; f < FC; f++) {
-            const float* row = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(out_ptr) + f * out_stride);
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_add_ps(acc[f][o],
-                    _mm512_loadu_ps(row + o * AVX512_BS));  // [LOAD-OUTPUT]
-        }
-    }
-
-    // [LOAD-BIAS] Optional bias addition — one vmovups + vaddps per filter row
-    if (flags & MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION) {
-        for (int f = 0; f < FC; f++) {
-            __m512 bvec = _mm512_loadu_ps(bias + f * AVX512_BS);  // [LOAD-BIAS]
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_add_ps(acc[f][o], bvec);
-        }
-    }
-
-    // Optional ReLU — vmaxps zmm, zmm_zero, zmm_acc
-    if (flags & MLAS_CONV_KERNEL_FLAG_RELU_ACTIVATION) {
-        const __m512 zero = _mm512_setzero_ps();
-        for (int f = 0; f < FC; f++)
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_max_ps(zero, acc[f][o]);  // [RELU]
-    }
-
-    // [STORE-OUTPUT] vmovups to output buffer, advancing r8 by OC*16*sizeof(float)
+    // OPT-2: merge accumulate+bias+relu+store into one for-f for-o pass.
+    // OPT-5: when bias+accum both active, fuse via fmadd(1, existing_out, acc+bias)
+    //        emitting vfmadd231ps instead of two vaddps.
+    const bool do_accum = (flags & MLAS_CONV_KERNEL_FLAG_ACCUMULATE_OUTPUT) != 0;
+    const bool do_bias  = (flags & MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION)     != 0;
+    const bool do_relu  = (flags & MLAS_CONV_KERNEL_FLAG_RELU_ACTIVATION)   != 0;
+    const __m512 zero   = _mm512_setzero_ps();
+    const __m512 one    = _mm512_set1_ps(1.0f);
     for (int f = 0; f < FC; f++) {
         float* row = reinterpret_cast<float*>(
             reinterpret_cast<char*>(out_ptr) + f * out_stride);
-        for (int o = 0; o < OC; o++)
-            _mm512_storeu_ps(row + o * AVX512_BS, acc[f][o]);  // [STORE-OUTPUT]
+        const __m512 bvec = do_bias ? _mm512_loadu_ps(bias + f * AVX512_BS)  // [LOAD-BIAS]
+                                    : _mm512_setzero_ps();
+        for (int o = 0; o < OC; o++) {
+            __m512 v = do_bias ? _mm512_add_ps(acc[f][o], bvec) : acc[f][o];
+            if (do_accum) v = _mm512_fmadd_ps(one, _mm512_loadu_ps(row + o * AVX512_BS), v);  // [LOAD-OUTPUT + FMA]
+            if (do_relu)  v = _mm512_max_ps(zero, v);  // [RELU]
+            _mm512_storeu_ps(row + o * AVX512_BS, v);  // [STORE-OUTPUT]
+        }
     }
 }
 
@@ -179,27 +164,21 @@ static SCONV_FORCEINLINE void ComputeNchwcBlock(
     const float* filter_base,
     size_t filter_stride)
 {
+    // OPT-1: f-outer loop — filter loaded once per (f,i), reused across all OC.
+    //        in_bc[] eliminated; broadcast inlined → vfmadd231ps zmm, zmm, [mem]{1to16}.
+    //        ZMM pressure: FC=4,OC=6 was 31 (24 acc+6 in_bc+1 filt), now 25 (24 acc+1 filt).
+    // OPT-3: _mm512_load_ps (vmovaps) — 16×16 filter tiles are 64-byte aligned.
     for (int i = 0; i < AVX512_BS; i++) {
-        // ── [LOAD-INPUT] Broadcast input channel 'i' for each output column ──
-        // Assembly uses zmm26..zmm31 for OC=1..6 respectively.
-        // For FC==1 && OC==1, assembly emits DWORD BCST embedded in the FMA.
-        __m512 in_bc[OC];
-        for (int o = 0; o < OC; o++) {
-            const float* p = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
-            in_bc[o] = _mm512_set1_ps(*p);  // [LOAD-INPUT] vbroadcastss from 4 bytes
-        }
-
-        // ── [LOAD-FILTER + FMA] Load 16oc weights and accumulate ──
-        // Assembly uses zmm24 as the reused filter vector (scratch register).
-        // For FC>1, filter rows are accessed as rdx, rdx+rsi, rbx, rbx+rsi.
         for (int f = 0; f < FC; f++) {
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_base) + f * filter_stride)
                 + i * AVX512_BS;
-            const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] vmovups 64 bytes
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
+            const __m512 fvec = _mm512_load_ps(fp);   // [LOAD-FILTER] vmovaps 64 bytes (aligned)
+            for (int o = 0; o < OC; o++) {
+                const float* p = reinterpret_cast<const float*>(
+                    reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
+                acc[f][o] = _mm512_fmadd_ps(fvec, _mm512_set1_ps(*p), acc[f][o]);  // [FMA+BCST]
+            }
         }
     }
 }
@@ -251,6 +230,10 @@ static void ProcessNchwcOutputs(
         const float* col_filter = row_filter;
 
         for (size_t kc = 0; kc < kernel_width; kc++) {
+            // OPT-4: prefetch next filter tile into L1 (T0); next input block into L2 (T1)
+            _mm_prefetch(reinterpret_cast<const char*>(col_filter) + AVX512_BS * AVX512_BS * sizeof(float), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(col_input)  + dilation_width, _MM_HINT_T1);
+
             // Inner unrolled loop over 16 input channel indices
             // (mirrors "IRP Index, <0,1,...,15>" in assembly)
             ComputeNchwcBlock<FC, OC>(acc, col_input, stride_width, col_filter, filter_stride);
@@ -548,23 +531,19 @@ static SCONV_FORCEINLINE void ComputePointwiseBlock(
     const float* filter_block,
     size_t filter_stride)
 {
-    // Identical inner loop to NCHWc — the assembly uses the same ComputeBlock
-    // macro for KernelType=Pointwise with BlockSize=16.
+    // OPT-1: f-outer loop; in_bc[] eliminated; broadcast inlined into fmadd.
+    // OPT-3: _mm512_load_ps — filter tiles are 64-byte aligned.
     for (int i = 0; i < AVX512_BS; i++) {
-        __m512 in_bc[OC];
-        for (int o = 0; o < OC; o++) {
-            const float* p = reinterpret_cast<const float*>(
-                reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
-            in_bc[o] = _mm512_set1_ps(*p);  // [LOAD-INPUT] 4 bytes per output col
-        }
-
         for (int f = 0; f < FC; f++) {
             const float* fp = reinterpret_cast<const float*>(
                 reinterpret_cast<const char*>(filter_block) + f * filter_stride)
                 + i * AVX512_BS;
-            const __m512 fvec = _mm512_loadu_ps(fp);  // [LOAD-FILTER] 64 bytes
-            for (int o = 0; o < OC; o++)
-                acc[f][o] = _mm512_fmadd_ps(fvec, in_bc[o], acc[f][o]);  // [FMA]
+            const __m512 fvec = _mm512_load_ps(fp);   // [LOAD-FILTER] vmovaps 64 bytes (aligned)
+            for (int o = 0; o < OC; o++) {
+                const float* p = reinterpret_cast<const float*>(
+                    reinterpret_cast<const char*>(input_block) + o * stride_width) + i;
+                acc[f][o] = _mm512_fmadd_ps(fvec, _mm512_set1_ps(*p), acc[f][o]);  // [FMA+BCST]
+            }
         }
     }
 }
@@ -612,6 +591,10 @@ static void ProcessPointwiseOutputs(
     // Outer loop: iterate over input channel blocks
     // Each iteration processes one 16i×16o filter tile
     for (size_t ch = 0; ch < input_channels; ch++) {
+        // OPT-4: prefetch next filter tile into L1 (T0); next input block into L2 (T1)
+        _mm_prefetch(reinterpret_cast<const char*>(cur_filter) + AVX512_BS * AVX512_BS * sizeof(float), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(cur_input)  + input_stride, _MM_HINT_T1);
+
         ComputePointwiseBlock<FC, OC>(acc, cur_input, stride_width, cur_filter, filter_stride);
 
         // Advance input to next channel block (InputStride bytes)
