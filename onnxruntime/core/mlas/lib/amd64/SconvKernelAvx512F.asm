@@ -124,47 +124,39 @@ IF FilterCount EQ 1
         EmitIfCountGE OutputCount, 5, <vfmadd231ps zmm16,zmm24,DWORD BCST [r14+r9+BroadcastOffset]>
         EmitIfCountGE OutputCount, 6, <vfmadd231ps zmm20,zmm24,DWORD BCST [r14+r9*2+BroadcastOffset]>
 ELSE
-        EmitIfCountGE OutputCount, 1, <vbroadcastss zmm26,DWORD PTR [rcx+BroadcastOffset]>
-        EmitIfCountGE OutputCount, 2, <vbroadcastss zmm27,DWORD PTR [rcx+r9+BroadcastOffset]>
-        EmitIfCountGE OutputCount, 3, <vbroadcastss zmm28,DWORD PTR [rcx+r9*2+BroadcastOffset]>
-        EmitIfCountGE OutputCount, 4, <vbroadcastss zmm29,DWORD PTR [r14+BroadcastOffset]>
-        EmitIfCountGE OutputCount, 5, <vbroadcastss zmm30,DWORD PTR [r14+r9+BroadcastOffset]>
-        EmitIfCountGE OutputCount, 6, <vbroadcastss zmm31,DWORD PTR [r14+r9*2+BroadcastOffset]>
-IF OutputCount EQ 1
-        EmitIfCountGE FilterCount, 1, <vfmadd231ps zmm0,zmm26,ZMMWORD PTR [rdx+VectorOffset]>
-        EmitIfCountGE FilterCount, 2, <vfmadd231ps zmm1,zmm26,ZMMWORD PTR [rdx+rsi+VectorOffset]>
-        EmitIfCountGE FilterCount, 3, <vfmadd231ps zmm2,zmm26,ZMMWORD PTR [rbx+VectorOffset]>
-        EmitIfCountGE FilterCount, 4, <vfmadd231ps zmm3,zmm26,ZMMWORD PTR [rbx+rsi+VectorOffset]>
-ELSE
+        ; OPT-3: f-outer with inline DWORD BCST — eliminates zmm26-31 pre-broadcast registers.
+        ; Filter loaded once per row into zmm24, reused across all output columns.
+        ; Embedded broadcast (DWORD BCST) in FMA reads input scalar directly from memory.
+        ; ZMM pressure: FC=4,OC=6 was 24 acc + 6 broadcast + 1 filter = 31 ZMMs,
+        ;               now 24 acc + 1 filter = 25 ZMMs — no register spills.
         EmitIfCountGE FilterCount, 1, <vmovups zmm24,ZMMWORD PTR [rdx+VectorOffset]>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 1, <vfmadd231ps zmm0,zmm26,zmm24>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 2, <vfmadd231ps zmm4,zmm27,zmm24>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 3, <vfmadd231ps zmm8,zmm28,zmm24>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 4, <vfmadd231ps zmm12,zmm29,zmm24>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 5, <vfmadd231ps zmm16,zmm30,zmm24>
-        EmitIfCount2GE FilterCount, 1, OutputCount, 6, <vfmadd231ps zmm20,zmm31,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 1, <vfmadd231ps zmm0,zmm24,DWORD BCST [rcx+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 2, <vfmadd231ps zmm4,zmm24,DWORD BCST [rcx+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 3, <vfmadd231ps zmm8,zmm24,DWORD BCST [rcx+r9*2+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 4, <vfmadd231ps zmm12,zmm24,DWORD BCST [r14+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 5, <vfmadd231ps zmm16,zmm24,DWORD BCST [r14+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 6, <vfmadd231ps zmm20,zmm24,DWORD BCST [r14+r9*2+BroadcastOffset]>
         EmitIfCountGE FilterCount, 2, <vmovups zmm24,ZMMWORD PTR [rdx+rsi+VectorOffset]>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 1, <vfmadd231ps zmm1,zmm26,zmm24>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 2, <vfmadd231ps zmm5,zmm27,zmm24>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 3, <vfmadd231ps zmm9,zmm28,zmm24>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vfmadd231ps zmm13,zmm29,zmm24>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vfmadd231ps zmm17,zmm30,zmm24>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vfmadd231ps zmm21,zmm31,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 1, <vfmadd231ps zmm1,zmm24,DWORD BCST [rcx+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 2, <vfmadd231ps zmm5,zmm24,DWORD BCST [rcx+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 3, <vfmadd231ps zmm9,zmm24,DWORD BCST [rcx+r9*2+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vfmadd231ps zmm13,zmm24,DWORD BCST [r14+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vfmadd231ps zmm17,zmm24,DWORD BCST [r14+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vfmadd231ps zmm21,zmm24,DWORD BCST [r14+r9*2+BroadcastOffset]>
         EmitIfCountGE FilterCount, 3, <vmovups zmm24,ZMMWORD PTR [rbx+VectorOffset]>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vfmadd231ps zmm2,zmm26,zmm24>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vfmadd231ps zmm6,zmm27,zmm24>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vfmadd231ps zmm10,zmm28,zmm24>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vfmadd231ps zmm14,zmm29,zmm24>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vfmadd231ps zmm18,zmm30,zmm24>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vfmadd231ps zmm22,zmm31,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vfmadd231ps zmm2,zmm24,DWORD BCST [rcx+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vfmadd231ps zmm6,zmm24,DWORD BCST [rcx+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vfmadd231ps zmm10,zmm24,DWORD BCST [rcx+r9*2+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vfmadd231ps zmm14,zmm24,DWORD BCST [r14+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vfmadd231ps zmm18,zmm24,DWORD BCST [r14+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vfmadd231ps zmm22,zmm24,DWORD BCST [r14+r9*2+BroadcastOffset]>
         EmitIfCountGE FilterCount, 4, <vmovups zmm24,ZMMWORD PTR [rbx+rsi+VectorOffset]>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vfmadd231ps zmm3,zmm26,zmm24>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vfmadd231ps zmm7,zmm27,zmm24>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vfmadd231ps zmm11,zmm28,zmm24>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vfmadd231ps zmm15,zmm29,zmm24>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vfmadd231ps zmm19,zmm30,zmm24>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vfmadd231ps zmm23,zmm31,zmm24>
-ENDIF
+        EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vfmadd231ps zmm3,zmm24,DWORD BCST [rcx+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vfmadd231ps zmm7,zmm24,DWORD BCST [rcx+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vfmadd231ps zmm11,zmm24,DWORD BCST [rcx+r9*2+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vfmadd231ps zmm15,zmm24,DWORD BCST [r14+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vfmadd231ps zmm19,zmm24,DWORD BCST [r14+r9+BroadcastOffset]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vfmadd231ps zmm23,zmm24,DWORD BCST [r14+r9*2+BroadcastOffset]>
 ENDIF
 ENDIF
 
