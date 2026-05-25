@@ -245,6 +245,8 @@ IF FilterCount GT 2
 ENDIF
 IFIDNI <KernelType>, <Nchwc>
 IF BlockSize EQ 16
+        prefetcht0 [rdx+BlockSize*BlockSize*4]  ; prefetch next filter tile into L1
+        prefetcht1 [rcx+rbp]                    ; prefetch next input block into L2
         IRP     Index, <0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>
             ComputeBlock KernelType, FilterCount, OutputCount, Index*16*4, Index*4
         ENDM
@@ -725,6 +727,8 @@ IF FilterCount GT 2
         lea     rbx,[rdx+rsi*2]             ; compute filter plus 2 rows
 ENDIF
 IF BlockSize EQ 16
+        prefetcht0 [rdx+BlockSize*BlockSize*4]  ; prefetch next filter tile into L1
+        prefetcht1 [rcx+rbp]                    ; prefetch next input block into L2
         IRP     Index, <0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>
             ComputeBlock Pointwise, FilterCount, OutputCount, Index*16*4, Index*4
         ENDM
