@@ -1295,6 +1295,20 @@ MlasReorderFilterOIHWBiBo(
 
 void
 MLASCALL
+MlasReorderFilterOIHWBiBo_Interleaved(
+    const int64_t* FilterShape,
+    const float* S,
+    float* D
+    );
+
+bool
+MLASCALL
+MlasNchwcFilterShouldInterleave(
+    size_t OutputChannels
+    );
+
+void
+MLASCALL
 MlasReorderFilterOIHWBo(
     const int64_t* FilterShape,
     const float* S,

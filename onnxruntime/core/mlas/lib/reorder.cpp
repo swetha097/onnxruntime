@@ -855,6 +855,142 @@ Return Value:
 
 void
 MLASCALL
+MlasReorderFilterOIHWBiBo_Interleaved(
+    const int64_t* FilterShape,
+    const float* S,
+    float* D
+    )
+/*++
+
+Routine Description:
+
+    This routine reorders a filter buffer from OIHW to the FC-row interleaved
+    OIHWBiBo format used by MlasConvNchwcInterleavedFloatKernelAvx512F.
+
+    Instead of storing each OC-block contiguously (FilterStride bytes apart),
+    the 4 OC-blocks within each FilterSet are interleaved at the IC granularity:
+
+      For each IC position bi (0..BlockSize-1) within a kernel column:
+        OC-block 0 data:  16 floats  (64 bytes)
+        OC-block 1 data:  16 floats  (64 bytes)
+        OC-block 2 data:  16 floats  (64 bytes)
+        OC-block 3 data:  16 floats  (64 bytes)
+                          ──────────────────────
+        Subtotal per bi:  256 bytes
+
+    This makes all filter loads for one kernel column sequential rather than
+    FilterStride (~36 KB) apart, dramatically improving cache utilisation.
+
+    The caller must ensure OutputChannels is a multiple of
+    FilterSetSize * BlockSize (= 64 for AVX-512).
+
+Arguments:
+
+    FilterShape - Supplies the shape of the filter tensor [OC, IC, kH, kW].
+
+    S - Supplies the address of the source tensor (OIHW layout).
+
+    D - Supplies the address of the destination tensor.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    const size_t BlockSize = MlasNchwcGetBlockSize();        // 16 for AVX-512F
+    constexpr size_t FilterSetSize = 4;                      // 4 OC-blocks per group
+    const size_t GroupSize = FilterSetSize * BlockSize;      // 64 OC channels per group
+
+    const size_t OutputChannels = size_t(FilterShape[0]);
+    const size_t InputChannels  = size_t(FilterShape[1]);
+    const size_t KernelHeight   = size_t(FilterShape[2]);
+    const size_t KernelWidth    = size_t(FilterShape[3]);
+
+    const size_t KernelSize  = KernelHeight * KernelWidth;
+    const size_t InputStride = InputChannels * KernelSize;   // floats between consecutive OC
+
+    const MLAS_FLOAT32X4 ZeroFloat32x4 = MlasZeroFloat32x4();
+
+    //
+    // Iterate over groups of FilterSetSize (4) OC-blocks.
+    //
+    for (size_t o = OutputChannels; o > 0;) {
+
+        const size_t GroupOCThisIteration = std::min(o, GroupSize);
+        o -= GroupOCThisIteration;
+
+        const float* S_InputChannels = S;
+
+        //
+        // Iterate over BlockSize batches of the input channels.
+        //
+        for (size_t i = InputChannels; i > 0;) {
+
+            const size_t IcThisBlock = std::min(i, BlockSize);
+            i -= IcThisBlock;
+
+            const float* S_KernelSize = S_InputChannels;
+
+            for (size_t k = 0; k < KernelSize; k++) {
+
+                const float* S_bi = S_KernelSize;
+
+                //
+                // For each IC position within the IC-block, write all 4 OC-blocks
+                // consecutively (interleaved layout).
+                //
+                for (size_t bi = 0; bi < IcThisBlock; bi++) {
+
+                    for (size_t ob = 0; ob < FilterSetSize; ob++) {
+
+                        const size_t OcBaseThisBlock  = ob * BlockSize;
+                        const size_t OcCountThisBlock = std::min(BlockSize, GroupOCThisIteration - OcBaseThisBlock);
+                        const size_t AlignedOcCount   = OcCountThisBlock & (~size_t(3));
+
+                        const float* s = S_bi + ob * BlockSize * InputStride;
+                        size_t bo = 0;
+
+                        for (; bo < AlignedOcCount; bo += 4) {
+                            MlasReorderGatherFloat32x4(s, D, InputStride);
+                            s += 4 * InputStride;
+                            D += 4;
+                        }
+
+                        for (; bo < OcCountThisBlock; bo++) {
+                            *D++ = *s;
+                            s += InputStride;
+                        }
+
+                        for (; bo < BlockSize; bo++) {
+                            *D++ = 0.0f;   // zero-pad partial OC-block
+                        }
+                    }
+
+                    S_bi += KernelSize;
+                }
+
+                //
+                // Zero-pad remaining IC positions in this IC-block.
+                // Each padded row needs FilterSetSize * BlockSize floats.
+                //
+                for (size_t z = 0; z < (BlockSize - IcThisBlock) * FilterSetSize * (BlockSize / 4); z++) {
+                    MlasStoreFloat32x4(D, ZeroFloat32x4);
+                    D += 4;
+                }
+
+                S_KernelSize += 1;
+            }
+
+            S_InputChannels += BlockSize * KernelSize;
+        }
+
+        S += GroupSize * InputStride;
+    }
+}
+
+void
+MLASCALL
 MlasReorderFilterOIHWBo(
     const int64_t* FilterShape,
     const float* S,

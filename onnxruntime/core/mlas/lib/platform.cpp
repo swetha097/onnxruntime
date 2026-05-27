@@ -341,6 +341,7 @@ Return Value:
     this->GemmDoubleKernel = MlasGemmDoubleKernelSse;
     this->ConvNchwFloatKernel = MlasConvNchwFloatKernelSse;
     this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelSse;
+    this->ConvNchwcInterleavedFloatKernel = nullptr;  // requires AVX-512F
     this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelSse;
     this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelSse;
     this->PoolFloatKernel[MlasMaximumPooling] = MlasPoolMaximumFloatKernelSse;
@@ -532,6 +533,7 @@ Return Value:
                     this->GemmDoubleKernel = MlasGemmDoubleKernelAvx512F;
                     this->ConvNchwFloatKernel = MlasConvNchwFloatKernelAvx512F;
                     this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelAvx512F;
+                    this->ConvNchwcInterleavedFloatKernel = MlasConvNchwcInterleavedFloatKernelAvx512F;
                     this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelAvx512F;
                     this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelAvx512F;
                     this->PoolFloatKernel[MlasMaximumPooling] = MlasPoolMaximumFloatKernelAvx512F;

@@ -1151,6 +1151,7 @@ extern "C" {
     MLAS_CONV_POINTWISE_FLOAT_KERNEL MlasConvPointwiseFloatKernelFma3;
     MLAS_CONV_FLOAT_KERNEL MlasConvNchwFloatKernelAvx512F;
     MLAS_CONV_FLOAT_KERNEL MlasConvNchwcFloatKernelAvx512F;
+    MLAS_CONV_FLOAT_KERNEL MlasConvNchwcInterleavedFloatKernelAvx512F;
     MLAS_CONV_DEPTHWISE_FLOAT_KERNEL MlasConvDepthwiseFloatKernelAvx512F;
     MLAS_CONV_POINTWISE_FLOAT_KERNEL MlasConvPointwiseFloatKernelAvx512F;
     MLAS_POOL_FLOAT_KERNEL MlasPoolMaximumFloatKernelSse;
@@ -1622,6 +1623,7 @@ MLAS_COMPUTE_TANH_FP16_KERNEL* TanhFP16KernelRoutine = nullptr;
     MLAS_GEMM_U8U8_KERNEL* GemmU8U8Kernel;
     MLAS_CONV_FLOAT_KERNEL* ConvNchwFloatKernel;
     MLAS_CONV_FLOAT_KERNEL* ConvNchwcFloatKernel;
+    MLAS_CONV_FLOAT_KERNEL* ConvNchwcInterleavedFloatKernel;
     MLAS_CONV_DEPTHWISE_FLOAT_KERNEL* ConvDepthwiseFloatKernel;
     MLAS_CONV_POINTWISE_FLOAT_KERNEL* ConvPointwiseFloatKernel;
     MLAS_POOL_FLOAT_KERNEL* PoolFloatKernel[MlasPoolingKindCount];

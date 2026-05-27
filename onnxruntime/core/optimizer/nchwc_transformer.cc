@@ -433,6 +433,12 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
     // Reorder the weights tensor statically.
     if (reorder_filter_OIHWBo) {
       MlasReorderFilterOIHWBo(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
+    } else if ((group_count == 1) &&
+               MlasNchwcFilterShouldInterleave(static_cast<size_t>(nchwc_output_channels))) {
+      // Use the FC-row interleaved packing for standard (GroupCount == 1) NCHWc
+      // convolutions whose output channel count is a multiple of 64 on AVX-512.
+      // The matching interleaved kernel is selected at inference time in snchwc.cpp.
+      MlasReorderFilterOIHWBiBo_Interleaved(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
     } else {
       MlasReorderFilterOIHWBiBo(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
     }

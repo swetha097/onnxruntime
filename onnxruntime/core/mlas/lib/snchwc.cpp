@@ -78,6 +78,46 @@ struct MLAS_NCHWC_POOL_WORK_BLOCK : MLAS_NCHWC_WORK_BLOCK
 #define MLAS_CONV_KERNEL_FLAG_OTHER_ACTIVATION      0x00000008
 #define MLAS_CONV_KERNEL_MLAS_ARM_USE_KLEIDIAI      0x00000010
 
+bool
+MLASCALL
+MlasNchwcFilterShouldInterleave(
+    size_t OutputChannels
+    )
+/*++
+
+Routine Description:
+
+    Returns true when the FC-row interleaved filter layout should be used for
+    a convolution with the given (NCHWc-aligned) output channel count.
+
+    The interleaved layout requires:
+      - AVX-512F support (BlockSize == 16, interleaved kernel available)
+      - OutputChannels divisible by FilterSetSize * BlockSize = 64
+
+Arguments:
+
+    OutputChannels - Supplies the NCHWc-aligned output channel count.
+
+Return Value:
+
+    TRUE if the interleaved layout and kernel should be used.
+
+--*/
+{
+#if defined(MLAS_TARGET_AMD64)
+    constexpr size_t FilterSetSize = 4;
+    const auto& Platform = GetMlasPlatform();
+    if (Platform.ConvNchwcInterleavedFloatKernel == nullptr) {
+        return false;
+    }
+    const size_t BlockSize = Platform.NchwcBlockSize;
+    return (BlockSize == 16) && ((OutputChannels % (FilterSetSize * BlockSize)) == 0);
+#else
+    (void)OutputChannels;
+    return false;
+#endif
+}
+
 size_t
 MLASCALL
 MlasNchwcGetBlockSize(
@@ -683,11 +723,46 @@ struct MLAS_NCHWC_CONV_NCHWC_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
 
         const size_t BlockedOutputWidth = BlockSize * OutputWidth;
 
+        //
+        // Select regular or FC-row interleaved kernel based on filter packing.
+        // The interleaved layout is used when the TOTAL (GroupCount-multiplied)
+        // NCHWc output channel count is divisible by FilterSetSize * BlockSize (64).
+        // This must exactly match the condition used in nchwc_transformer.cc so
+        // filter packing and kernel selection stay in sync.
+        // GroupCount == 1 is an additional guard to avoid complexity with grouped
+        // convolutions whose per-group count may differ from the total.
+        //
+        const bool UseInterleaved = (GroupCount == 1) &&
+            MlasNchwcFilterShouldInterleave(
+                (OutputChannels + BlockSize - 1) & ~(BlockSize - 1));
+
 #if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || (defined(MLAS_TARGET_ARM64) && defined(MLAS_USE_ARM_NEON_NCHWC)) || (defined(MLAS_TARGET_RISCV64) && defined(MLAS_USE_RVV))
-        MLAS_CONV_FLOAT_KERNEL* Kernel = GetMlasPlatform().ConvNchwcFloatKernel;
+        MLAS_CONV_FLOAT_KERNEL* Kernel;
+#if defined(MLAS_TARGET_AMD64)
+        if (UseInterleaved) {
+            Kernel = GetMlasPlatform().ConvNchwcInterleavedFloatKernel;
+        } else {
+            Kernel = GetMlasPlatform().ConvNchwcFloatKernel;
+        }
+#else
+        Kernel = GetMlasPlatform().ConvNchwcFloatKernel;
+#endif
 #else
         MLAS_CONV_FLOAT_KERNEL* Kernel = MlasConvNchwcFloatKernel;
 #endif
+
+        //
+        // Precompute interleaved-specific parameters.
+        // For the interleaved layout each IC-block occupies
+        // FilterSetSize * BlockSize * BlockSize * KernelWidth floats per kernel row.
+        //
+        const size_t IcFilterStep = UseInterleaved
+            ? FilterSetSize * BlockSize * BlockSize * KernelSize   // floats per IC-block (interleaved)
+            : BlockSize * BlockSize * KernelSize;                  // floats per IC-block (standard)
+
+        const size_t KernelRowFilterStride = UseInterleaved
+            ? FilterSetSize * BlockSize * BlockSize * KernelWidth  // floats per kernel row (interleaved)
+            : BlockSize * BlockSize * KernelWidth;                 // floats per kernel row (standard)
 
         while (WorkRemaining > 0) {
 
@@ -718,21 +793,32 @@ struct MLAS_NCHWC_CONV_NCHWC_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
                     // Constrain the effective kernel parameters if the output row
                     // uses one or more input padding rows.
                     //
-
-                    const float* filter = Filter + BlockSize * ic * KernelSize;
+                    // filter base for this IC-block:
+                    //   standard:    Filter + BlockSize * ic * KernelSize
+                    //   interleaved: Filter + FilterSetSize * BlockSize * ic * KernelSize
+                    //
+                    const float* filter = Filter + (ic / BlockSize) * IcFilterStep;
                     size_t ih;
                     size_t EffectiveKernelHeight;
 
-                    ComputeEffectiveKernel(ph + work, BlockSize * BlockSize * KernelWidth,
+                    ComputeEffectiveKernel(ph + work, KernelRowFilterStride,
                         &filter, &ih, &EffectiveKernelHeight);
 
                     //
                     // Invoke the convolution kernel.
                     //
 
+                    //
+                    // For the interleaved kernel FilterStride (rsi) is unused;
+                    // pass 0 so that any accidental lea rbx,[rdx+rsi*2] is
+                    // harmless (rbx is not read in the interleaved ComputeBlock).
+                    //
+                    const size_t EffectiveFilterStrideBytes =
+                        UseInterleaved ? 0 : FilterStrideBytes;
+
                     Kernel(input + BlockSize * (ih * InputWidth - PaddingLeftX),
                         filter, output, StrideWidthBytes, DilationWidthBytes,
-                        FilterCount, InputStrideBytes, FilterStrideBytes,
+                        FilterCount, InputStrideBytes, EffectiveFilterStrideBytes,
                         OutputStrideBytes, EffectiveKernelHeight, KernelWidth,
                         input + BlockSize * (ih * InputWidth), InputWidthBytes,
                         DilatedInputWidthBytes, OutputCountLeftPadX, OutputCountX,

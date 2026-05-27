@@ -130,6 +130,51 @@ ELSE
         EmitIfCountGE OutputCount, 4, <vbroadcastss zmm29,DWORD PTR [r14+BroadcastOffset]>
         EmitIfCountGE OutputCount, 5, <vbroadcastss zmm30,DWORD PTR [r14+r9+BroadcastOffset]>
         EmitIfCountGE OutputCount, 6, <vbroadcastss zmm31,DWORD PTR [r14+r9*2+BroadcastOffset]>
+IFIDNI <KernelType>, <NchwcInterleaved>
+;
+; FC-row interleaved layout: OC-blocks are consecutive at +0/+64/+128/+192 bytes
+; from [rdx+VectorOffset], eliminating strided cache-thrashing loads.
+; VectorOffset = Index*4*16*4 = Index*256 (set by caller IRP).
+;
+IF OutputCount EQ 1
+        EmitIfCountGE FilterCount, 1, <vfmadd231ps zmm0,zmm26,ZMMWORD PTR [rdx+VectorOffset]>
+        EmitIfCountGE FilterCount, 2, <vfmadd231ps zmm1,zmm26,ZMMWORD PTR [rdx+VectorOffset+64]>
+        EmitIfCountGE FilterCount, 3, <vfmadd231ps zmm2,zmm26,ZMMWORD PTR [rdx+VectorOffset+128]>
+        EmitIfCountGE FilterCount, 4, <vfmadd231ps zmm3,zmm26,ZMMWORD PTR [rdx+VectorOffset+192]>
+ELSE
+        vmovups zmm24,ZMMWORD PTR [rdx+VectorOffset]
+        EmitIfCount2GE FilterCount, 1, OutputCount, 1, <vfmadd231ps zmm0,zmm26,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 2, <vfmadd231ps zmm4,zmm27,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 3, <vfmadd231ps zmm8,zmm28,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 4, <vfmadd231ps zmm12,zmm29,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 5, <vfmadd231ps zmm16,zmm30,zmm24>
+        EmitIfCount2GE FilterCount, 1, OutputCount, 6, <vfmadd231ps zmm20,zmm31,zmm24>
+        EmitIfCountGE FilterCount, 2, <vmovups zmm24,ZMMWORD PTR [rdx+VectorOffset+64]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 1, <vfmadd231ps zmm1,zmm26,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 2, <vfmadd231ps zmm5,zmm27,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 3, <vfmadd231ps zmm9,zmm28,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vfmadd231ps zmm13,zmm29,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vfmadd231ps zmm17,zmm30,zmm24>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vfmadd231ps zmm21,zmm31,zmm24>
+        EmitIfCountGE FilterCount, 3, <vmovups zmm24,ZMMWORD PTR [rdx+VectorOffset+128]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vfmadd231ps zmm2,zmm26,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vfmadd231ps zmm6,zmm27,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vfmadd231ps zmm10,zmm28,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vfmadd231ps zmm14,zmm29,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vfmadd231ps zmm18,zmm30,zmm24>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vfmadd231ps zmm22,zmm31,zmm24>
+        EmitIfCountGE FilterCount, 4, <vmovups zmm24,ZMMWORD PTR [rdx+VectorOffset+192]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vfmadd231ps zmm3,zmm26,zmm24>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vfmadd231ps zmm7,zmm27,zmm24>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vfmadd231ps zmm11,zmm28,zmm24>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vfmadd231ps zmm15,zmm29,zmm24>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vfmadd231ps zmm19,zmm30,zmm24>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vfmadd231ps zmm23,zmm31,zmm24>
+ENDIF
+ELSE
+;
+; Standard Nchwc layout: OC-blocks are FilterStride (rsi) bytes apart.
+;
 IF OutputCount EQ 1
         EmitIfCountGE FilterCount, 1, <vfmadd231ps zmm0,zmm26,ZMMWORD PTR [rdx+VectorOffset]>
         EmitIfCountGE FilterCount, 2, <vfmadd231ps zmm1,zmm26,ZMMWORD PTR [rdx+rsi+VectorOffset]>
@@ -165,6 +210,7 @@ ELSE
         EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vfmadd231ps zmm19,zmm30,zmm24>
         EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vfmadd231ps zmm23,zmm31,zmm24>
 ENDIF
+ENDIF  ; IFIDNI NchwcInterleaved
 ENDIF
 ENDIF
 
@@ -341,6 +387,7 @@ ProcessRemainingOutputCount1:
 
 SconvKernelFunction Nchw, 16, Avx512F
 SconvKernelFunction Nchwc, 16, Avx512F
+SconvKernelFunction NchwcInterleaved, 16, Avx512F
 SconvKernelDepthwiseFunction 16, Avx512F
 SconvKernelPointwiseFunction Avx512F
 
@@ -467,15 +514,15 @@ SkipBiasAddition:
         EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vmaxps zmm2,zmm24,zmm2>
         EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vmaxps zmm6,zmm24,zmm6>
         EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vmaxps zmm10,zmm24,zmm10>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vmaxps zmm14,zmm24,zmm14>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vmaxps zmm18,zmm24,zmm18>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vmaxps zmm22,zmm24,zmm22>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vmaxps zmm14,zmm24,zmm14>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vmaxps zmm18,zmm24,zmm18>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vmaxps zmm22,zmm24,zmm22>
         EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vmaxps zmm3,zmm24,zmm3>
         EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vmaxps zmm7,zmm24,zmm7>
         EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vmaxps zmm11,zmm24,zmm11>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vmaxps zmm15,zmm24,zmm15>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vmaxps zmm19,zmm24,zmm19>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vmaxps zmm23,zmm24,zmm23>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vmaxps zmm15,zmm24,zmm15>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vmaxps zmm19,zmm24,zmm19>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vmaxps zmm23,zmm24,zmm23>
 
 SkipReluActivation:
 

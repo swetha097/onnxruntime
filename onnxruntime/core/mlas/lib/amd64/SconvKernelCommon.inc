@@ -253,6 +253,15 @@ ELSE
             ComputeBlock KernelType, FilterCount, OutputCount, (Index-4)*8*4, Index*4
         ENDM
 ENDIF
+ELSEIFIDNI <KernelType>, <NchwcInterleaved>
+        ; FC-row interleaved layout: VectorOffset = Index * 4 OC-blocks * BlockSize * sizeof(float)
+        ; = Index * 4 * 16 * 4 = Index * 256 bytes, so all 4 OC-blocks for IC[Index]
+        ; are consecutive at [rdx+VectorOffset+0/64/128/192].
+IF BlockSize EQ 16
+        IRP     Index, <0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>
+            ComputeBlock KernelType, FilterCount, OutputCount, Index*4*16*4, Index*4
+        ENDM
+ENDIF
 ELSE
         ComputeBlock KernelType, FilterCount, OutputCount, 0, 0
 ENDIF
@@ -260,9 +269,11 @@ ENDIF
 SkipOverPadding:
         add     rcx,rbp                     ; advance input by dilation width
 IFIDNI <KernelType>, <Nchwc>
-        add     rdx,BlockSize*BlockSize*4   ; advance filter by 8i8o/16i16o block
+        add     rdx,BlockSize*BlockSize*4       ; advance filter by 16i16o block (1024 bytes)
+ELSEIFIDNI <KernelType>, <NchwcInterleaved>
+        add     rdx,4*BlockSize*BlockSize*4     ; advance interleaved filter: 4 FC-rows (4096 bytes)
 ELSE
-        add     rdx,BlockSize*4             ; advance filter by 8o/16o block
+        add     rdx,BlockSize*4                 ; advance filter by 16o block
 ENDIF
         dec     rax                         ; decrement columns remaining
         jnz     ProcessNextColumn
