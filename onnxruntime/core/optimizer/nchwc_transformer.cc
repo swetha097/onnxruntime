@@ -147,6 +147,7 @@ class NchwcTransformerImpl {
   // multiple nodes can share the NCHWc filter.
   InlinedHashMap<NodeArg*, NodeArg*> filters_OIHWBo_;
   InlinedHashMap<NodeArg*, NodeArg*> filters_OIHWBiBo_;
+  InlinedHashMap<NodeArg*, NodeArg*> filters_OIHWBiBo_Interleaved_;  // FC-row interleaved layout
 
   // Stores a mapping of NodeArg biases that have already been aligned to the
   // NCHWc block size, so multiple nodes can share the NCHWc biases.
@@ -407,10 +408,44 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
     }
   }
 
+  // Detect if this convolution will use MLAS_NCHWC_CONV_POINTWISE_ALGORITHM at
+  // runtime.  That path is taken when IC >= BlockSize AND kH=1 AND kW=1 AND all
+  // padding = 0.  It uses a separate kernel that expects the standard OIHWBiBo
+  // filter layout -- NOT the FC-row interleaved layout.
+  // Note: when reorder_filter_OIHWBo=true the IC < BlockSize case is already
+  // handled, so we only need to check kH, kW and padding here.
+  bool is_pointwise_conv = false;
+  if (!reorder_filter_OIHWBo &&
+      conv_W_tensor_proto->dims(2) == 1 && conv_W_tensor_proto->dims(3) == 1) {
+    // Assume zero padding unless an attribute says otherwise.
+    is_pointwise_conv = true;
+    const auto* pads_attr = graph_utils::GetNodeAttribute(node, "pads");
+    if (pads_attr != nullptr) {
+      for (int i = 0; i < pads_attr->ints_size(); i++) {
+        if (pads_attr->ints(i) != 0) { is_pointwise_conv = false; break; }
+      }
+    }
+    if (is_pointwise_conv) {
+      const auto* auto_pad_attr = graph_utils::GetNodeAttribute(node, "auto_pad");
+      if (auto_pad_attr != nullptr && utils::HasString(*auto_pad_attr)) {
+        const auto& ap = auto_pad_attr->s();
+        if (ap == "SAME_UPPER" || ap == "SAME_LOWER") is_pointwise_conv = false;
+      }
+    }
+  }
+
+  // Use the FC-row interleaved filter layout only for standard NCHWc convolutions
+  // (not pointwise, not depthwise/grouped) whose OC is a multiple of 64.
+  const bool use_interleaved_filter = (!reorder_filter_OIHWBo && !is_pointwise_conv &&
+      group_count == 1 &&
+      MlasNchwcFilterShouldInterleave(static_cast<size_t>(nchwc_output_channels)));
+
   // Check if the filter has already been converted to the target format.
   InlinedHashMap<NodeArg*, NodeArg*>* filters_map;
   if (reorder_filter_OIHWBo) {
     filters_map = &filters_OIHWBo_;
+  } else if (use_interleaved_filter) {
+    filters_map = &filters_OIHWBiBo_Interleaved_;
   } else {
     filters_map = &filters_OIHWBiBo_;
   }
@@ -433,11 +468,10 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
     // Reorder the weights tensor statically.
     if (reorder_filter_OIHWBo) {
       MlasReorderFilterOIHWBo(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
-    } else if ((group_count == 1) &&
-               MlasNchwcFilterShouldInterleave(static_cast<size_t>(nchwc_output_channels))) {
-      // Use the FC-row interleaved packing for standard (GroupCount == 1) NCHWc
-      // convolutions whose output channel count is a multiple of 64 on AVX-512.
-      // The matching interleaved kernel is selected at inference time in snchwc.cpp.
+    } else if (use_interleaved_filter) {
+      // FC-row interleaved packing: all 4 OC-blocks consecutive per IC position.
+      // Only used for non-pointwise, single-group NCHWc convs with OC % 64 == 0.
+      // The matching interleaved kernel is selected at runtime in snchwc.cpp.
       MlasReorderFilterOIHWBiBo_Interleaved(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
     } else {
       MlasReorderFilterOIHWBiBo(conv_W_dims.data(), conv_W.data<float>(), reordered_filter.data());
