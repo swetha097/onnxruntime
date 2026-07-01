@@ -407,41 +407,37 @@ SkipAccumulateOutput:
 
         test    dl,MLAS_CONV_KERNEL_FLAG_BIAS_ADDITION
         jz      SkipBiasAddition
-IF OutputCount EQ 1
-        EmitIfCountGE FilterCount, 1, <vaddps zmm0,zmm0,ZMMWORD PTR [rcx]>
-        EmitIfCountGE FilterCount, 2, <vaddps zmm1,zmm1,ZMMWORD PTR [rcx+16*4]>
-        EmitIfCountGE FilterCount, 3, <vaddps zmm2,zmm2,ZMMWORD PTR [rcx+32*4]>
-        EmitIfCountGE FilterCount, 4, <vaddps zmm3,zmm3,ZMMWORD PTR [rcx+48*4]>
-ELSE
+        ; OPT-4: load bias once per filter row into zmm28, apply to all output columns.
+        ; Eliminates IF OutputCount EQ 1 / ELSE split — same path for all OC counts.
+        ; Frees zmm29-31 (previously held bias for FC=2,3,4); only zmm28 reused.
         EmitIfCountGE FilterCount, 1, <vmovups zmm28,ZMMWORD PTR [rcx]>
-        EmitIfCountGE FilterCount, 2, <vmovups zmm29,ZMMWORD PTR [rcx+16*4]>
-        EmitIfCountGE FilterCount, 3, <vmovups zmm30,ZMMWORD PTR [rcx+32*4]>
-        EmitIfCountGE FilterCount, 4, <vmovups zmm31,ZMMWORD PTR [rcx+48*4]>
         EmitIfCount2GE FilterCount, 1, OutputCount, 1, <vaddps zmm0,zmm0,zmm28>
         EmitIfCount2GE FilterCount, 1, OutputCount, 2, <vaddps zmm4,zmm4,zmm28>
         EmitIfCount2GE FilterCount, 1, OutputCount, 3, <vaddps zmm8,zmm8,zmm28>
         EmitIfCount2GE FilterCount, 1, OutputCount, 4, <vaddps zmm12,zmm12,zmm28>
         EmitIfCount2GE FilterCount, 1, OutputCount, 5, <vaddps zmm16,zmm16,zmm28>
         EmitIfCount2GE FilterCount, 1, OutputCount, 6, <vaddps zmm20,zmm20,zmm28>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 1, <vaddps zmm1,zmm1,zmm29>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 2, <vaddps zmm5,zmm5,zmm29>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 3, <vaddps zmm9,zmm9,zmm29>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vaddps zmm13,zmm13,zmm29>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vaddps zmm17,zmm17,zmm29>
-        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vaddps zmm21,zmm21,zmm29>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vaddps zmm2,zmm2,zmm30>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vaddps zmm6,zmm6,zmm30>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vaddps zmm10,zmm10,zmm30>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vaddps zmm14,zmm14,zmm30>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vaddps zmm18,zmm18,zmm30>
-        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vaddps zmm22,zmm22,zmm30>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vaddps zmm3,zmm3,zmm31>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vaddps zmm7,zmm7,zmm31>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vaddps zmm11,zmm11,zmm31>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vaddps zmm15,zmm15,zmm31>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vaddps zmm19,zmm19,zmm31>
-        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vaddps zmm23,zmm23,zmm31>
-ENDIF
+        EmitIfCountGE FilterCount, 2, <vmovups zmm28,ZMMWORD PTR [rcx+16*4]>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 1, <vaddps zmm1,zmm1,zmm28>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 2, <vaddps zmm5,zmm5,zmm28>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 3, <vaddps zmm9,zmm9,zmm28>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 4, <vaddps zmm13,zmm13,zmm28>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 5, <vaddps zmm17,zmm17,zmm28>
+        EmitIfCount2GE FilterCount, 2, OutputCount, 6, <vaddps zmm21,zmm21,zmm28>
+        EmitIfCountGE FilterCount, 3, <vmovups zmm28,ZMMWORD PTR [rcx+32*4]>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 1, <vaddps zmm2,zmm2,zmm28>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 2, <vaddps zmm6,zmm6,zmm28>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 3, <vaddps zmm10,zmm10,zmm28>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 4, <vaddps zmm14,zmm14,zmm28>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 5, <vaddps zmm18,zmm18,zmm28>
+        EmitIfCount2GE FilterCount, 3, OutputCount, 6, <vaddps zmm22,zmm22,zmm28>
+        EmitIfCountGE FilterCount, 4, <vmovups zmm28,ZMMWORD PTR [rcx+48*4]>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 1, <vaddps zmm3,zmm3,zmm28>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 2, <vaddps zmm7,zmm7,zmm28>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 3, <vaddps zmm11,zmm11,zmm28>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 4, <vaddps zmm15,zmm15,zmm28>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 5, <vaddps zmm19,zmm19,zmm28>
+        EmitIfCount2GE FilterCount, 4, OutputCount, 6, <vaddps zmm23,zmm23,zmm28>
 
 SkipBiasAddition:
 
