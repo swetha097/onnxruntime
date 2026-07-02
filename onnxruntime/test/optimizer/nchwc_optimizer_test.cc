@@ -374,6 +374,63 @@ TEST(NchwcOptimizerTests, ConvNchwcHardSigmoidNotHardSwish) {
   NchwcOptimizerTester(build_test_case, check_nchwc_graph);
 }
 
+// Verify that Mul(x, Sigmoid(x)) — the ONNX decomposition of SiLU — is fused
+// into the producing NCHWc conv as a SiLU activation, removing both the Sigmoid
+// and the Mul from the graph (YOLOX / Swish-based detection models).
+TEST(NchwcOptimizerTests, ConvNchwcSiLUFusion) {
+  auto build_test_case = [&](NchwcTestHelper& helper) {
+    auto* input_arg = helper.MakeInput<float>({16, 64, 28, 28});
+    auto* conv_output_arg = helper.MakeIntermediate();
+    auto* sigmoid_output_arg = helper.MakeIntermediate();
+    auto* silu_output_arg = helper.MakeIntermediate();
+    auto* output_arg = helper.MakeOutput();
+
+    helper.AddConvNode(input_arg, conv_output_arg, {128, 64, 3, 3});
+
+    // Sigmoid(conv_output).
+    helper.AddNode("Sigmoid", {conv_output_arg}, {sigmoid_output_arg});
+
+    // Mul(conv_output, Sigmoid(conv_output)) == SiLU(conv_output).
+    helper.AddNode("Mul", {conv_output_arg, sigmoid_output_arg}, {silu_output_arg});
+
+    // Trailing conv so the Mul output is a normal intermediate rather than a
+    // graph output.
+    helper.AddConvNode(silu_output_arg, output_arg, {64, 128, 1, 1});
+  };
+
+  auto check_nchwc_graph = [&](InferenceSessionWrapper& session) {
+    auto op_to_count = CountOpsInGraph(session.GetGraph());
+    EXPECT_EQ(op_to_count["com.microsoft.nchwc.Conv"], 2);
+    // The Sigmoid and Mul must be fused away into the conv activation.
+    EXPECT_EQ(op_to_count["Sigmoid"], 0);
+    EXPECT_EQ(op_to_count["Mul"], 0);
+  };
+
+  NchwcOptimizerTester(build_test_case, check_nchwc_graph);
+}
+
+// A plain Sigmoid (single consumer, no Mul diamond) must still fuse as a
+// Sigmoid activation on the conv — not misidentified as SiLU.
+TEST(NchwcOptimizerTests, ConvNchwcSigmoidNotSiLU) {
+  auto build_test_case = [&](NchwcTestHelper& helper) {
+    auto* input_arg = helper.MakeInput<float>({16, 64, 28, 28});
+    auto* conv_output_arg = helper.MakeIntermediate();
+    auto* output_arg = helper.MakeOutput();
+
+    helper.AddConvNode(input_arg, conv_output_arg, {128, 64, 3, 3});
+    // Plain Sigmoid (single consumer, no Mul diamond).
+    helper.AddNode("Sigmoid", {conv_output_arg}, {output_arg});
+  };
+
+  auto check_nchwc_graph = [&](InferenceSessionWrapper& session) {
+    auto op_to_count = CountOpsInGraph(session.GetGraph());
+    EXPECT_EQ(op_to_count["com.microsoft.nchwc.Conv"], 1);
+    EXPECT_EQ(op_to_count["Sigmoid"], 0);  // fused as Sigmoid activation on the conv
+  };
+
+  NchwcOptimizerTester(build_test_case, check_nchwc_graph);
+}
+
 TEST(NchwcOptimizerTests, ConvNchwcGrouped) {
   auto test_case = [&](const std::string& activation_op_type) {
     auto build_test_case = [&](NchwcTestHelper& helper) {

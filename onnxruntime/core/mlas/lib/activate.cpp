@@ -16,6 +16,8 @@ Abstract:
 
 #include "mlasi.h"
 
+#include <vector>
+
 //
 // Templates for bias addition functions.
 //
@@ -547,6 +549,27 @@ Return Value:
         case MlasHardSwishActivation:
         {
             MlasActivationKernel<MlasHardSwishActivation>(Activation, Buffer, Bias, M, N, ldc);
+            break;
+        }
+
+        case MlasSiLUActivation:
+        {
+            // Bias first, then SiLU(x) = x * sigmoid(x) in-place per row.
+            // MlasComputeSilu requires non-aliased Input/Output buffers, so
+            // allocate a temporary row buffer (N is the NCHWc block width,
+            // typically 8 or 16 — negligible stack cost).
+            if (Bias != nullptr) {
+                MlasActivationKernel<MlasIdentityActivation, true>(Activation, Buffer, Bias, M, N, ldc);
+            }
+
+            std::vector<float> TempRow(N);
+            float* Row = Buffer;
+            for (size_t m = 0; m < M; m++) {
+                MlasComputeSilu(Row, TempRow.data(), N);
+                std::copy(TempRow.begin(), TempRow.end(), Row);
+                Row += ldc;
+            }
+
             break;
         }
 

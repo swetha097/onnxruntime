@@ -133,6 +133,10 @@ class NchwcTransformerImpl {
   // and `nchwc_input` the NchwcArgument for that conv output. Returns true if the
   // fusion was applied (and both the HardSigmoid and Mul were removed).
   bool TryFuseNchwcHardSwish(Node& hardsigmoid, NodeArg* conv_output_arg, NchwcArgument& nchwc_input);
+  // Analogous to TryFuseNchwcHardSwish: fuse the SiLU diamond Mul(x, Sigmoid(x))
+  // into the producing NCHWc conv as a SiLU activation. YOLOX and many detection
+  // models use SiLU (Swish) as their primary activation.
+  bool TryFuseNchwcSiLU(Node& sigmoid, NodeArg* conv_output_arg, NchwcArgument& nchwc_input);
   void TransformBatchNormalization(Node& node);
   void TransformTransposeToNhwc(Node& node);
   void TransformResize(Node& node);
@@ -966,6 +970,74 @@ bool NchwcTransformerImpl::TryFuseNchwcHardSwish(Node& hardsigmoid,
   return true;
 }
 
+bool NchwcTransformerImpl::TryFuseNchwcSiLU(Node& sigmoid,
+                                             NodeArg* conv_output_arg,
+                                             NchwcArgument& nchwc_input) {
+  // SiLU = x * sigmoid(x).  ONNX represents it as the diamond:
+  //   conv_out ──> Sigmoid ──> Mul(conv_out, sigmoid_out)
+  // which is identical in shape to the HardSwish diamond, just with a plain
+  // Sigmoid (no alpha/beta attributes) instead of HardSigmoid.
+  if (sigmoid.OpType() != "Sigmoid" || sigmoid.GetOutputEdgesCount() != 1) {
+    return false;
+  }
+
+  // The producing conv must be an unfused NCHWc Conv whose output feeds
+  // exactly two consumers (this Sigmoid and one Mul).
+  auto& nchwc_node = nchwc_input.output_node_;
+  if (nchwc_node.OpType() != "Conv" || nchwc_node.Domain() != kMSNchwcDomain) {
+    return false;
+  }
+  if (nchwc_input.starting_original_uses_ != 2) {
+    return false;
+  }
+  if (graph_utils::GetNodeAttribute(nchwc_node, "activation") != nullptr) {
+    return false;
+  }
+
+  // Find the sibling Mul that consumes both the conv output and the Sigmoid
+  // output (the SiLU elementwise multiply).
+  NodeArg* sigmoid_out = sigmoid.MutableOutputDefs()[0];
+  Node* mul_node = nullptr;
+  const auto consumers = graph_.GetConsumerNodes(conv_output_arg->Name());
+  for (const Node* consumer : consumers) {
+    if (consumer == &sigmoid) {
+      continue;
+    }
+    Node* candidate = graph_.GetNode(consumer->Index());
+    if (candidate == nullptr || candidate->OpType() != "Mul" ||
+        candidate->Domain() != kOnnxDomain || candidate->InputDefs().size() != 2) {
+      return false;
+    }
+    auto& mul_inputs = candidate->MutableInputDefs();
+    const bool consumes_conv = (mul_inputs[0] == conv_output_arg) || (mul_inputs[1] == conv_output_arg);
+    const bool consumes_sig = (mul_inputs[0] == sigmoid_out) || (mul_inputs[1] == sigmoid_out);
+    if (!consumes_conv || !consumes_sig) {
+      return false;
+    }
+    mul_node = candidate;
+  }
+  if (mul_node == nullptr) {
+    return false;
+  }
+  if (graph_.NodeProducesGraphOutput(sigmoid) || graph_.NodeProducesGraphOutput(*mul_node)) {
+    return false;
+  }
+
+  // Apply: mark the conv as SiLU and route the Mul's output onto the conv's
+  // NCHWc argument.  Account for both the Sigmoid and the Mul using the conv output.
+  nchwc_node.AddAttribute("activation", std::string("SiLU"));
+
+  nchwc_input.remaining_original_uses_--;  // Sigmoid use
+  nchwc_input.remaining_original_uses_--;  // Mul use
+
+  graph_utils::RemoveNodeOutputEdges(graph_, sigmoid);
+  removed_nodes_.push_front(sigmoid.Index());
+
+  FuseNchwcArgument(*mul_node, nchwc_input);
+  removed_nodes_.push_front(mul_node->Index());
+  return true;
+}
+
 // After doing a Conv/Add fusion, there may be an activation node that could now
 // be fused into the Conv node as well. Otherwise, this is an elementwise
 // operation that can directly use the NCHWc input.
@@ -985,6 +1057,15 @@ void NchwcTransformerImpl::TransformActivation(Node& node) {
     // is the same conv output, then fuse the whole thing into the conv as a
     // HardSwish activation and drop both the HardSigmoid and the Mul.
     if (TryFuseNchwcHardSwish(node, orig_input_arg, *nchwc_input)) {
+      return;
+    }
+
+    // SiLU diamond: SiLU(x) = x * sigmoid(x), decomposed in ONNX as
+    // Mul(x, Sigmoid(x)).  When this activation node is a Sigmoid reading a
+    // single-conv NCHWc output that is used by exactly this Sigmoid and one
+    // Mul whose other input is the same conv output, fuse the whole diamond into
+    // the conv as a SiLU activation (YOLOX / Swish-based detection models).
+    if (TryFuseNchwcSiLU(node, orig_input_arg, *nchwc_input)) {
       return;
     }
 

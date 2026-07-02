@@ -19,6 +19,8 @@ common::Status GetFusedActivationAttr(const OpKernelInfo& info, MLAS_ACTIVATION&
       activation.ActivationKind = MlasLogisticActivation;
     } else if (activation_type == "HardSwish") {
       activation.ActivationKind = MlasHardSwishActivation;
+    } else if (activation_type == "SiLU") {
+      activation.ActivationKind = MlasSiLUActivation;
     } else {
       // The remaining activation types have additional parameters to be pulled out.
       size_t activation_params_count;
