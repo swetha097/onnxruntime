@@ -67,4 +67,58 @@ Fusing Conv + SiLU eliminates steps 2 and 3 as separate full-tensor passes, comp
 
 ---
 
-*[Subsequent entries will be added after each experiment.]*
+---
+
+### 2026-07-07 — E1: SiLU diamond conv-fusion — measured, regresses nano/tiny
+
+**Hypothesis:** Fusing `Conv → Sigmoid → Mul(conv_out, sig_out)` into a single NCHWc Conv with `activation=SiLU` (analogous to the HardSwish +21%/+35% result on MobileNetV3) will eliminate 74–104 separate Sigmoid+Mul tensor passes per YOLOX inference and yield ≥5% improvement.
+
+**Graph verification:** ONNX inspection confirmed: yolox_s has 74, yolox_nano has 104, yolox_tiny has 74 Conv→SiLU fuseable diamonds. All are NCHWc-eligible (output channels multiple of 16). The fusion fires correctly — `TryFuseNchwcSiLU` matches all diamonds.
+
+**Benchmark results (10T, 10wu, 50 trials, RelWithDebInfo, AMD 7840U):**
+
+| Model | Base SS p50 | Opt SS p50 | Delta | Status |
+|---|---|---|---|---|
+| yolox_s    | 60.38 ms | 60.63 ms | −0.4% | NEUTRAL (noise-level) |
+| yolox_nano |  6.11 ms |  6.61 ms | −8.2% | **REGRESSION** (t≈16, significant) |
+| yolox_tiny | 18.66 ms | 19.26 ms | −3.2% | **REGRESSION** (t≈16, significant) |
+
+**Accuracy: ALL PASS** — mAP identical (1.0000 / 0.0455 / 0.0909) for all three models and all kernel variants tested. No accuracy regression in any configuration.
+
+**Root cause of regression — FMA3 asm vs C++ polynomial:**
+The unfused baseline dispatches Sigmoid via `MlasComputeLogisticF32KernelFma3` — a hand-optimized FMA3 assembly kernel tuned for Zen4. Its throughput exceeds any C++ polynomial computed inside the conv epilogue, even using the same coefficients. The fused path replaces one dedicated Zen4-tuned asm routine with a generic C++ scalar loop inside `MlasActivationKernel`, which cannot match it.
+
+Three kernel implementations were tested — all regress on nano/tiny:
+1. `MlasComputeSilu` via temp buffer → −4.8% nano, −2.1% tiny (heap allocation overhead)
+2. Platform `SiluKernelRoutine` (AVX-512F path, in-place) → −4.8% nano, −2.1% tiny (AVX-512 frequency throttle on AMD Zen 4)
+3. Inline rational-polynomial `MLAS_ACTIVATION_FUNCTION<MlasSiLUActivation>` template → −8.4% nano, −3.4% tiny (C++ polynomial vs FMA3 asm)
+
+**Why HardSwish fusion worked but SiLU fusion doesn't:**
+HardSwish baseline kernel was `MlasComputeLogistic` (polynomial) + linear clamp + multiply — the fused HardSwish `x * clip(αx+β, 0, 1)` is cheaper than the unfused two-pass path. SiLU's unfused baseline is `MlasComputeLogisticF32KernelFma3` (FMA3 *assembly*) + Mul — the assembly kernel is already faster than the C++ polynomial can achieve, so fusion cannot win.
+
+**Decision:** The SiLU diamond conv-fusion approach as implemented does NOT meet the goal on this AMD 7840U machine. The changes are accurate (mAP preserved) but fail the ≥5% performance gate for nano and tiny.
+
+**What would need to change to unlock this optimization:**
+The SiLU activation kernel inside `MlasActivationKernel` would need a platform-dispatched **FMA3/AVX2 assembly path** (analogous to the standalone `MlasComputeLogisticF32KernelFma3`) that achieves higher throughput than the unfused baseline. Until such a kernel exists, the fusion adds overhead rather than removing it. This is a pre-requisite for future SiLU fusion work.
+
+**Code state:** `activate.cpp` left with the inline polynomial template (v3, cleanest form). The graph-level fusion code is correct and can be re-enabled once a faster kernel exists. Full changes committed on `perf/yolox-silu-opt`.
+
+---
+
+## SUMMARY (2026-07-07)
+
+**Goal NOT MET for YOLOX.** Accuracy gate: ALL PASS. Performance gate: FAIL on nano (−8%) and tiny (−3%). yolox_s is neutral (±0.4%).
+
+**What was delivered:**
+- `TryFuseNchwcSiLU` — correct graph-level SiLU diamond fusion (verified against 74–104 sites per model)
+- `MlasSiLUActivation` with inline rational-polynomial epilogue kernel
+- Full unit tests (2 new NchwcOptimizerTests)
+- Complete benchmark suite (10T, 10wu, 50 trials, all three models)
+
+**Remaining gap:** The bottleneck is not the graph structure but the MLAS activation kernel. A hand-written FMA3/AVX2 assembly SiLU epilogue kernel (matching `MlasComputeLogisticF32KernelFma3` throughput) is the prerequisite for any SiLU conv-fusion win on AMD Zen 4.
+
+**Recommended next investigation for YOLOX perf:**
+1. Profile with VTune to identify actual hotspots (may be Concat layout copies, Resize bilinear, or NMS post-processing rather than SiLU)
+2. BatchNorm fusion — YOLOX exports with folded BN but the BN→Conv fusion in NCHWc may not be firing
+3. Depthwise / grouped conv improvements (yolox_nano uses grouped convolutions)
+4. Threading model — at 10 threads on 8-core AMD 7840U, SpinPause overhead may dominate small feature maps

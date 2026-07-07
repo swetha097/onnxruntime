@@ -16,8 +16,6 @@ Abstract:
 
 #include "mlasi.h"
 
-#include <vector>
-
 //
 // Templates for bias addition functions.
 //
@@ -265,6 +263,70 @@ struct MLAS_ACTIVATION_FUNCTION<MlasHardSwishActivation>
         Gate = std::max(Gate, MlasExtractLaneFloat32x4<0>(MinimumBroadcast));
         return Value * Gate;
 #endif
+    }
+};
+
+template<>
+struct MLAS_ACTIVATION_FUNCTION<MlasSiLUActivation>
+{
+    // Logistic polynomial constants (same as MlasLogisticKernel / MlasLogisticConstants).
+    MLAS_FLOAT32X4 LowerRange, UpperRange;
+    MLAS_FLOAT32X4 alpha_9, alpha_7, alpha_5, alpha_3, alpha_1;
+    MLAS_FLOAT32X4 beta_10, beta_8, beta_6, beta_4, beta_2, beta_0;
+    MLAS_FLOAT32X4 OneHalf, Zero, One;
+
+    MLAS_ACTIVATION_FUNCTION(const MLAS_ACTIVATION* Activation)
+    {
+        MLAS_UNREFERENCED_PARAMETER(Activation);
+        LowerRange = MlasBroadcastFloat32x4(-18.0f);
+        UpperRange = MlasBroadcastFloat32x4(18.0f);
+        alpha_9    = MlasBroadcastFloat32x4(4.37031012579801e-11f);
+        alpha_7    = MlasBroadcastFloat32x4(1.15627324459942e-07f);
+        alpha_5    = MlasBroadcastFloat32x4(6.08574864600143e-05f);
+        alpha_3    = MlasBroadcastFloat32x4(8.51377133304701e-03f);
+        alpha_1    = MlasBroadcastFloat32x4(2.48287947061529e-01f);
+        beta_10    = MlasBroadcastFloat32x4(6.10247389755681e-13f);
+        beta_8     = MlasBroadcastFloat32x4(5.76102136993427e-09f);
+        beta_6     = MlasBroadcastFloat32x4(6.29106785017040e-06f);
+        beta_4     = MlasBroadcastFloat32x4(1.70198817374094e-03f);
+        beta_2     = MlasBroadcastFloat32x4(1.16817656904453e-01f);
+        beta_0     = MlasBroadcastFloat32x4(9.93151921023180e-01f);
+        OneHalf    = MlasBroadcastFloat32x4(0.5f);
+        Zero       = MlasZeroFloat32x4();
+        One        = MlasBroadcastFloat32x4(1.0f);
+    }
+
+    // Compute sigmoid(x) via the same rational-polynomial approximation used by
+    // MlasLogisticKernel, then multiply by x to get SiLU(x) = x * sigmoid(x).
+    // Using MLAS_FLOAT32X4 (maps to 128/256-bit vector on the active ISA tier)
+    // avoids the AVX-512 frequency throttle that MlasSiluKernelAvx512F would incur.
+    MLAS_FLOAT32X4 Activate(MLAS_FLOAT32X4 Value)
+    {
+        MLAS_FLOAT32X4 Clamped = MlasMaximumFloat32x4(LowerRange, MlasMinimumFloat32x4(UpperRange, Value));
+        MLAS_FLOAT32X4 Sq     = MlasMultiplyFloat32x4(Clamped, Clamped);
+
+        MLAS_FLOAT32X4 P = MlasMultiplyAddFloat32x4(Sq, alpha_9, alpha_7);
+        P = MlasMultiplyAddFloat32x4(P, Sq, alpha_5);
+        P = MlasMultiplyAddFloat32x4(P, Sq, alpha_3);
+        P = MlasMultiplyAddFloat32x4(P, Sq, alpha_1);
+        P = MlasMultiplyFloat32x4(P, Clamped);
+
+        MLAS_FLOAT32X4 Q = MlasMultiplyAddFloat32x4(Sq, beta_10, beta_8);
+        Q = MlasMultiplyAddFloat32x4(Q, Sq, beta_6);
+        Q = MlasMultiplyAddFloat32x4(Q, Sq, beta_4);
+        Q = MlasMultiplyAddFloat32x4(Q, Sq, beta_2);
+        Q = MlasMultiplyAddFloat32x4(Q, Sq, beta_0);
+
+        MLAS_FLOAT32X4 Sigmoid = MlasClampFloat32x4(
+            MlasAddFloat32x4(MlasDivideFloat32x4(P, Q), OneHalf), 0.0f, 1.0f);
+
+        return MlasMultiplyFloat32x4(Value, Sigmoid);
+    }
+
+    float Activate(float Value)
+    {
+        float Logistic = 1.0f / (1.0f + std::exp(-Value));
+        return Value * Logistic;
     }
 };
 
@@ -554,22 +616,7 @@ Return Value:
 
         case MlasSiLUActivation:
         {
-            // Bias first, then SiLU(x) = x * sigmoid(x) in-place per row.
-            // MlasComputeSilu requires non-aliased Input/Output buffers, so
-            // allocate a temporary row buffer (N is the NCHWc block width,
-            // typically 8 or 16 — negligible stack cost).
-            if (Bias != nullptr) {
-                MlasActivationKernel<MlasIdentityActivation, true>(Activation, Buffer, Bias, M, N, ldc);
-            }
-
-            std::vector<float> TempRow(N);
-            float* Row = Buffer;
-            for (size_t m = 0; m < M; m++) {
-                MlasComputeSilu(Row, TempRow.data(), N);
-                std::copy(TempRow.begin(), TempRow.end(), Row);
-                Row += ldc;
-            }
-
+            MlasActivationKernel<MlasSiLUActivation>(Activation, Buffer, Bias, M, N, ldc);
             break;
         }
 

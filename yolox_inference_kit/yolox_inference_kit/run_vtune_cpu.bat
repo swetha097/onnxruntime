@@ -13,7 +13,7 @@ set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
 REM === Configuration ===
-set MODEL_DIR=C:\Users\sloganat\Documents\amd-onnxruntime\onnxruntime\yolox\models\yolox
+set MODEL_DIR=C:\Users\sloganat\Documents\amd-onnxruntime\onnxruntime\yolox\models
 set ONNX_INCLUDE=C:\Users\sloganat\Documents\amd-onnxruntime\onnxruntime\include\onnxruntime\core\session
 REM  Usage:  run_vtune_cpu_fixed.bat <threads> <onnx_lib_dir> [run_vtune]
 REM    %~1  = thread count (default 1)
