@@ -17,6 +17,88 @@ Abstract:
 
 #include "mlasi.h"
 
+#include <cstdlib>
+
+//
+// Number of work items to emit per unit of the degree of parallelism when
+// decomposing a NCHWc operation.
+//
+// A value of one emits exactly enough work items to cover the available
+// threads, clamped to the amount of work that actually exists. Larger values
+// oversubscribe the index space so that the thread pool can claim ranges
+// dynamically and absorb per-item cost skew. Zero selects the legacy
+// behaviour of always emitting one work item per thread without clamping.
+//
+// Overridable through the environment while the value is being tuned.
+//
+
+#if !defined(MLAS_NCHWC_DEFAULT_WORK_GRANULARITY)
+#define MLAS_NCHWC_DEFAULT_WORK_GRANULARITY 0
+#endif
+
+static
+ptrdiff_t
+MlasNchwcWorkGranularity(
+    void
+    )
+{
+    static const ptrdiff_t Granularity = []() -> ptrdiff_t {
+        ptrdiff_t Value = MLAS_NCHWC_DEFAULT_WORK_GRANULARITY;
+#if defined(_MSC_VER)
+        char* Buffer = nullptr;
+        size_t BufferSize = 0;
+        if (_dupenv_s(&Buffer, &BufferSize, "MLAS_NCHWC_WORK_GRAN") == 0 && Buffer != nullptr) {
+            Value = ptrdiff_t(atoi(Buffer));
+            free(Buffer);
+        }
+#else
+        if (const char* Env = getenv("MLAS_NCHWC_WORK_GRAN")) {
+            Value = ptrdiff_t(atoi(Env));
+        }
+#endif
+        if (Value < 0) {
+            Value = 0;
+        }
+        return Value;
+    }();
+
+    return Granularity;
+}
+
+//
+// Computes the number of work items to emit for a NCHWc operation given the
+// total amount of available work.
+//
+// Returns the degree of parallelism unmodified when the legacy behaviour is
+// selected, so that the scheduling decision is bit-for-bit unchanged.
+//
+
+static
+ptrdiff_t
+MlasNchwcWorkCount(
+    ptrdiff_t MaximumThreadCount,
+    size_t TotalWork
+    )
+{
+    const ptrdiff_t Granularity = MlasNchwcWorkGranularity();
+
+    if (Granularity == 0) {
+        return MaximumThreadCount;
+    }
+
+    ptrdiff_t WorkCount = MaximumThreadCount * Granularity;
+
+    if (size_t(WorkCount) > TotalWork) {
+        WorkCount = ptrdiff_t(TotalWork);
+    }
+
+    if (WorkCount < 1) {
+        WorkCount = 1;
+    }
+
+    return WorkCount;
+}
+
 //
 // Define the base thread context for NCWHc convolution or pooling operations.
 //
@@ -1381,6 +1463,7 @@ Return Value:
     //
 
     MLAS_THREADED_ROUTINE* ThreadedRoutine;
+    bool DepthwiseAlgorithm = false;
 
     if (WorkBlock.InputChannels >= MlasNchwcGetBlockSize()) {
         if (WorkBlock.KernelShape[0] == 1 && WorkBlock.KernelShape[1] == 1 &&
@@ -1392,6 +1475,7 @@ Return Value:
         }
     } else if (WorkBlock.InputChannels == 1 && WorkBlock.OutputChannels == 1) {
         ThreadedRoutine = MlasNchwcThreaded<MLAS_NCHWC_CONV_DEPTHWISE_ALGORITHM>;
+        DepthwiseAlgorithm = true;
     } else {
         ThreadedRoutine = MlasNchwcThreaded<MLAS_NCHWC_CONV_NCHW_ALGORITHM>;
     }
@@ -1399,8 +1483,44 @@ Return Value:
     //
     // Schedule the operation across a set of worker threads.
     //
+    // The algorithms above decompose the convolution into a linear index space
+    // that MlasPartitionWork splits into one contiguous range per work item.
+    // Two properties of that space matter when choosing how many items to emit:
+    //
+    //   1. It can hold fewer entries than there are threads. Every surplus
+    //      work item receives an empty range, so it contributes scheduling
+    //      traffic and nothing else.
+    //
+    //   2. Its entries are not equal cost. The trailing filter set of a
+    //      convolution whose block count is not a multiple of FilterSetSize
+    //      evaluates as few as a quarter of the filters of a full set, and
+    //      output rows overlapping the padding evaluate a shorter kernel.
+    //      MlasPartitionWork balances the *count* of entries, so that cost
+    //      skew lands on the critical path when each thread owns exactly one
+    //      range and no rebalancing is possible.
+    //
+    // Emitting several ranges per thread lets the thread pool claim them
+    // dynamically and absorb the skew; clamping to the total work removes the
+    // empty ranges.
+    //
 
-    WorkBlock.tids = MlasGetMaximumThreadCount(ThreadPool);
+    const size_t NchwcBlockSize = MlasNchwcGetBlockSize();
+    const size_t OutputHeight = WorkBlock.OutputShape[MLAS_NCHWC_NN_ALGORITHM::HeightShapeIndex];
+
+    size_t TotalWork;
+
+    if (DepthwiseAlgorithm) {
+        TotalWork = WorkBlock.BatchCount *
+            ((WorkBlock.GroupCount + NchwcBlockSize - 1) / NchwcBlockSize) * OutputHeight;
+    } else {
+        const size_t FilterSetStride =
+            NchwcBlockSize * MLAS_NCHWC_GROUPED_CONV_ALGORITHM::FilterSetSize;
+        const size_t FilterSetCount =
+            (WorkBlock.OutputChannels + FilterSetStride - 1) / FilterSetStride;
+        TotalWork = WorkBlock.BatchCount * WorkBlock.GroupCount * FilterSetCount * OutputHeight;
+    }
+
+    WorkBlock.tids = MlasNchwcWorkCount(MlasGetMaximumThreadCount(ThreadPool), TotalWork);
 
     MlasExecuteThreaded(ThreadedRoutine, &WorkBlock, WorkBlock.tids, ThreadPool);
 }
