@@ -314,6 +314,42 @@ TEST(NchwcOptimizerTests, ConvNchwc) {
   }
 }
 
+// The NCHWc convolution algorithm splits the output channel blocks into filter
+// sets that are processed one kernel invocation at a time, and those sets are
+// also the unit of work handed to each thread. When the block count is not a
+// multiple of the filter set size the sets are unevenly sized, so the per-set
+// filter count and the offset of each set into the output, filter and bias
+// buffers all have to be derived rather than assumed. Get either wrong and
+// channels are written to the wrong place.
+//
+// The channel counts below leave a remainder for both the 8 and 16 wide NCHWc
+// block sizes, so the ragged path is exercised whichever one the platform
+// selects: at block size 16 the block counts are 3, 5, 6 and 7, and at block
+// size 8 they are 6, 10, 12 and 14.
+TEST(NchwcOptimizerTests, ConvNchwcRaggedFilterSets) {
+  auto test_case = [&](int64_t output_channels, int64_t kernel_size) {
+    auto build_test_case = [&](NchwcTestHelper& helper) {
+      auto* input_arg = helper.MakeInput<float>({1, 64, 28, 28});
+      auto* output_arg = helper.MakeOutput();
+
+      helper.AddConvNode(input_arg, output_arg, {output_channels, 64, kernel_size, kernel_size});
+    };
+
+    auto check_nchwc_graph = [&](InferenceSessionWrapper& session) {
+      auto op_to_count = CountOpsInGraph(session.GetGraph());
+      EXPECT_EQ(op_to_count["com.microsoft.nchwc.Conv"], 1);
+    };
+
+    NchwcOptimizerTester(build_test_case, check_nchwc_graph);
+  };
+
+  // Both the general and the pointwise algorithms share this filter set logic.
+  for (int64_t output_channels : {48, 80, 96, 112}) {
+    test_case(output_channels, 3);
+    test_case(output_channels, 1);
+  }
+}
+
 TEST(NchwcOptimizerTests, ConvNchwcGrouped) {
   auto test_case = [&](const std::string& activation_op_type) {
     auto build_test_case = [&](NchwcTestHelper& helper) {
