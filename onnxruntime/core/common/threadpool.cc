@@ -635,7 +635,7 @@ static ptrdiff_t CalculateParallelForBlock(const ptrdiff_t n, const Eigen::Tenso
 #endif
 
 static double ParallelForCostScale() {
-  static const double kScale = []() -> double {
+  static const double kScale = []() {
     double value = ORT_DEFAULT_PARALLEL_COST_SCALE;
 #if defined(_MSC_VER)
     char* buffer = nullptr;

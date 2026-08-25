@@ -1156,20 +1156,35 @@ using Block = std::pair<std::ptrdiff_t, std::ptrdiff_t>;
 // Runs the kernel over [0, n) through TryParallelFor with the given per-unit
 // cost, filling `out` and returning the block boundaries ParallelFor handed out,
 // sorted by start index.
+//
+// The blocks are recorded without a lock by giving each one a slot it owns
+// outright: its start index. There are at most n blocks and their starts are
+// distinct, so a vector sized n upfront gives every block a private destination
+// and no two threads ever touch the same element. A block's end index is never
+// negative, so kUnclaimed marks a slot no block wrote to. Compacting the
+// claimed slots in index order then yields exactly the sorted block list,
+// without a separate sort.
 std::vector<Block> RunElementwise(ThreadPool* tp, std::ptrdiff_t n,
                                   const onnxruntime::TensorOpCost& cost,
                                   std::vector<float>& out) {
+  constexpr std::ptrdiff_t kUnclaimed = -1;
   out.assign(static_cast<size_t>(n), 0.0f);
-  std::vector<Block> blocks;
-  std::mutex blocks_mutex;
+  std::vector<Block> blocks(static_cast<size_t>(n), Block{0, kUnclaimed});
   ThreadPool::TryParallelFor(tp, n, cost, [&](std::ptrdiff_t first, std::ptrdiff_t last) {
     for (std::ptrdiff_t i = first; i < last; ++i) {
       out[static_cast<size_t>(i)] = ElementKernel(i);
     }
-    std::lock_guard<std::mutex> guard(blocks_mutex);
-    blocks.emplace_back(first, last);
+    blocks[static_cast<size_t>(first)] = Block{first, last};
   });
-  std::sort(blocks.begin(), blocks.end());
+  // TryParallelFor joins every block before returning, so those writes are
+  // visible here.
+  size_t claimed = 0;
+  for (size_t i = 0; i < blocks.size(); ++i) {
+    if (blocks[i].second != kUnclaimed) {
+      blocks[claimed++] = blocks[i];
+    }
+  }
+  blocks.resize(claimed);
   return blocks;
 }
 

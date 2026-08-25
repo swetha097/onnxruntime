@@ -25,6 +25,7 @@
 // fixed for the lifetime of a process and cannot be varied from inside a test.)
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -70,13 +71,17 @@ struct ThreadingConfig {
 // and the cost scale cannot influence the result.
 const ThreadingConfig kReferenceConfig{/*intra_op_num_threads*/ 1, /*spin_backoff_max*/ nullptr};
 
+constexpr std::array<int, 3> kThreadCounts{2, 4, 8};
+// <default> pins the shipped default (2); 1 is the pre-change value; 8 and the
+// clamped-above-limit value cover the rest of the range.
+constexpr std::array<const char*, 5> kSpinBackoffMaxValues{nullptr, "1", "2", "8", "1024"};
+
 std::vector<ThreadingConfig> ThreadingConfigsUnderTest() {
   std::vector<ThreadingConfig> configs;
-  for (int num_threads : {2, 4, 8}) {
-    // <default> pins the shipped default (2); 1 is the pre-change value; 8 and
-    // the clamped-above-limit value cover the rest of the range.
-    for (const char* backoff : {static_cast<const char*>(nullptr), "1", "2", "8", "1024"}) {
-      configs.push_back(ThreadingConfig{num_threads, backoff});
+  configs.reserve(kThreadCounts.size() * kSpinBackoffMaxValues.size());
+  for (int num_threads : kThreadCounts) {
+    for (const char* backoff : kSpinBackoffMaxValues) {
+      configs.emplace_back(ThreadingConfig{num_threads, backoff});
     }
   }
   return configs;
@@ -87,7 +92,10 @@ std::vector<ThreadingConfig> ThreadingConfigsUnderTest() {
 // feeds are reproducible too.
 class ThreadingAccuracyModel {
  public:
-  explicit ThreadingAccuracyModel(const std::function<void(ModelTestBuilder&)>& build_graph) {
+  // Two-phase construction: the gtest ASSERT_* macros expand to a `return`
+  // statement, which a constructor is not allowed to use, so the fallible part
+  // of the setup lives here. Callers wrap this in ASSERT_NO_FATAL_FAILURE.
+  void Build(const std::function<void(ModelTestBuilder&)>& build_graph) {
     std::unordered_map<std::string, int> domain_to_version;
     domain_to_version[kOnnxDomain] = kOpsetVersion;
     Model model("IntraOpThreadingAccuracy", false, ModelMetaData(), PathString(),
@@ -181,8 +189,8 @@ void ExpectFloatOutputsMatch(const OrtValue& actual, const OrtValue& expected,
 
 void ExpectAccuracyAcrossThreadingConfigs(const std::function<void(ModelTestBuilder&)>& build_graph,
                                           double relative_tolerance) {
-  ThreadingAccuracyModel model(build_graph);
-  ASSERT_FALSE(::testing::Test::HasFatalFailure());
+  ThreadingAccuracyModel model;
+  ASSERT_NO_FATAL_FAILURE(model.Build(build_graph));
 
   std::vector<OrtValue> reference_fetches;
   ASSERT_NO_FATAL_FAILURE(model.Run(kReferenceConfig, reference_fetches));
