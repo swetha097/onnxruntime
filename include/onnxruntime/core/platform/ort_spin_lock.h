@@ -15,10 +15,21 @@ struct OrtSpinLock {
                            Unlocked };
 
   void lock() noexcept {
-    LockState state = Unlocked;
-    while (!state_.compare_exchange_weak(state, Locked, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-      state = Unlocked;
-      concurrency::SpinPause();  // pause and retry
+    // Test-and-test-and-set: attempt the acquiring RMW, and while it is
+    // contended spin on a plain (shared, read-only) load rather than hammering
+    // the cacheline with repeated read-for-ownership traffic. Only once the
+    // lock appears free do we retry the compare-exchange.
+    for (;;) {
+      LockState state = Unlocked;
+      if (state_.compare_exchange_weak(state, Locked, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        return;
+      }
+      // Contended: wait for the holder to release, reading the line in the
+      // shared state so other spinners can share the cacheline. The acquiring
+      // ordering is supplied by the compare_exchange above on the next retry.
+      while (state_.load(std::memory_order_relaxed) == Locked) {
+        concurrency::SpinPause();  // pause and retry
+      }
     }
   }
   bool try_lock() noexcept {
