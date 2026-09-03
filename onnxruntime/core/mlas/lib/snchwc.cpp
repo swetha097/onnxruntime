@@ -17,6 +17,93 @@ Abstract:
 
 #include "mlasi.h"
 
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+
+namespace {
+
+//
+// Reads an environment variable into a caller supplied buffer. MSVC rejects
+// getenv outright, so the secure variant is used there.
+//
+
+bool
+MlasNchwcGetEnvironmentVariable(const char* Name, char* Buffer, size_t BufferSize)
+{
+ORT_ENFORCE(BufferSize > 0);
+#if defined(_MSC_VER)
+    size_t Length = 0;
+
+    if (getenv_s(&Length, Buffer, BufferSize, Name) != 0) {
+        return false;
+    }
+
+    return (Length != 0);
+#else
+    const char* Value = std::getenv(Name);
+
+    if (Value == nullptr) {
+        return false;
+    }
+
+    std::strncpy(Buffer, Value, BufferSize - 1);
+    Buffer[BufferSize - 1] = '\0';
+
+    return true;
+#endif
+}
+
+//
+// Controls whether the output channel blocks are spread evenly over the filter
+// sets. Enabled by default; set MLAS_NCHWC_FILTERSET_BALANCE=0 to restore the
+// previous ragged-last-set behavior. The toggle exists so that the two
+// partitionings can be compared from a single binary, which removes the build
+// as a variable when measuring.
+//
+
+bool
+MlasNchwcUseBalancedFilterSets(void)
+{
+    static const bool Enabled = []() {
+        char Buffer[16];
+
+        if (!MlasNchwcGetEnvironmentVariable("MLAS_NCHWC_FILTERSET_BALANCE", Buffer, sizeof(Buffer))) {
+            return true;
+        }
+
+        return (Buffer[0] != '0');
+    }();
+
+    return Enabled;
+}
+
+//
+// Controls whether the filter set size may be reduced below FilterSetSize when
+// a convolution would otherwise not produce enough work units to keep every
+// thread busy. Work units are (filter set, output line) pairs, so a shallow
+// output with few filter sets can leave threads idle. Disabled by default.
+//
+
+size_t
+MlasNchwcFilterSetTarget(void)
+{
+    static const size_t Target = []() {
+        char Buffer[16];
+
+        if (!MlasNchwcGetEnvironmentVariable("MLAS_NCHWC_FSS_TARGET", Buffer, sizeof(Buffer))) {
+            return size_t{0};
+        }
+
+        const int Parsed = std::atoi(Buffer);
+        return (Parsed > 0) ? static_cast<size_t>(Parsed) : size_t{0};
+    }();
+
+    return Target;
+}
+
+}  // namespace
+
 //
 // Define the base thread context for NCWHc convolution or pooling operations.
 //
@@ -525,9 +612,38 @@ struct MLAS_NCHWC_GROUPED_CONV_ALGORITHM : MLAS_NCHWC_CONV_ALGORITHM
     // reused for a given set of input inside the kernel.
     //
 
-    static constexpr size_t FilterSetSize = 4;
+    static constexpr size_t MaximumFilterSetSize = 4;
 
+    //
+    // Number of output channel blocks handled by one kernel invocation. Larger
+    // is cheaper per multiply-accumulate because a broadcast input is reused
+    // across every filter block, but it also produces fewer, coarser work units.
+    //
+
+    const size_t FilterSetSize;
     const size_t FilterSetCount;
+
+    //
+    // Distribute the output channel blocks evenly over the filter sets.
+    //
+    // Assigning FilterSetSize blocks to every set leaves the remainder in the
+    // final set, so that set can be up to FilterSetSize times cheaper than its
+    // peers. Work units are partitioned by count rather than by cost, and the
+    // output line index varies fastest, so a whole ragged filter set is handed
+    // to a different thread than the full ones and that thread finishes early.
+    //
+    // Spreading the blocks evenly costs nothing: the number of filter sets is
+    // unchanged, so the kernel still broadcasts each input the same number of
+    // times and issues the same number of multiply-accumulates. Only the
+    // per-thread balance changes.
+    //
+    // Example, 96 channels with a block size of 16: 6 blocks previously split
+    // as 4 + 2 and now split as 3 + 3.
+    //
+
+    const bool BalancedFilterSets;
+    const size_t FilterSetBase;
+    const size_t FilterSetRemainder;
 
     //
     // Stores the current output line, filter cluster, and group that this thread
@@ -540,25 +656,87 @@ struct MLAS_NCHWC_GROUPED_CONV_ALGORITHM : MLAS_NCHWC_CONV_ALGORITHM
     size_t WorkRemaining;
     size_t FilterCount;
 
+    //
+    // Picks the filter set size. Normally the maximum, but when the resulting
+    // work unit count would not give every thread a reasonable number of units
+    // the size is halved so the operation splits more finely.
+    //
+
+    size_t ChooseFilterSetSize(void) const
+    {
+        const size_t Target = MlasNchwcFilterSetTarget();
+
+        if (Target == 0 || WorkBlock->tids <= 1) {
+            return MaximumFilterSetSize;
+        }
+
+        //
+        // MlasNchwcGetBlockSize() returns one rather than zero on platforms
+        // without NCHWc support, precisely so this division is always safe.
+        //
+
+        assert(BlockSize > 0);
+
+        const size_t Wanted = static_cast<size_t>(WorkBlock->tids) * Target;
+        ORT_ENFORCE(BlockSize > 0);
+        const size_t Blocks = OutputChannels / BlockSize;
+
+        size_t Size = MaximumFilterSetSize;
+
+        while (Size > 1) {
+            const size_t Sets = (Blocks + Size - 1) / Size;
+
+            if (BatchCount * GroupCount * Sets * OutputHeight >= Wanted) {
+                break;
+            }
+
+            Size /= 2;
+        }
+
+        return Size;
+    }
+
     MLAS_NCHWC_GROUPED_CONV_ALGORITHM(const MLAS_NCHWC_CONV_WORK_BLOCK* WorkBlock) :
         MLAS_NCHWC_CONV_ALGORITHM(WorkBlock),
-        FilterSetCount((OutputChannels + (BlockSize * FilterSetSize) - 1) / (BlockSize * FilterSetSize))
+        FilterSetSize(ChooseFilterSetSize()),
+        FilterSetCount((OutputChannels + (BlockSize * FilterSetSize) - 1) / (BlockSize * FilterSetSize)),
+        BalancedFilterSets(MlasNchwcUseBalancedFilterSets()),
+        FilterSetBase((OutputChannels / BlockSize) / FilterSetCount),
+        FilterSetRemainder((OutputChannels / BlockSize) % FilterSetCount)
     {
+    }
+
+    //
+    // Returns the index of the first output channel block owned by a filter set.
+    //
+
+    size_t FilterSetBlockOffset(size_t Set) const
+    {
+        if (!BalancedFilterSets) {
+            return Set * FilterSetSize;
+        }
+
+        return Set * FilterSetBase + std::min(Set, FilterSetRemainder);
     }
 
     void ComputeFilterCount(void)
     {
-        FilterCount = std::min(FilterSetSize, (OutputChannels / BlockSize) - FilterSet * FilterSetSize);
+        if (!BalancedFilterSets) {
+            FilterCount = std::min(FilterSetSize, (OutputChannels / BlockSize) - FilterSet * FilterSetSize);
+            return;
+        }
+
+        //
+        // FilterSetCount is the ceiling of the block count over FilterSetSize,
+        // so FilterSetBase never exceeds FilterSetSize and the kernel dispatch
+        // table is always in range.
+        //
+
+        FilterCount = FilterSetBase + ((FilterSet < FilterSetRemainder) ? 1 : 0);
     }
 
-    void PrepareWork(ptrdiff_t Index)
+    void SeekToWork(size_t WorkIndex)
     {
-        const size_t TotalWork = BatchCount * GroupCount * FilterSetCount * OutputHeight;
-
-        size_t WorkIndex;
-
-        MlasPartitionWork(Index, WorkBlock->tids, TotalWork, &WorkIndex, &WorkRemaining);
-
         //
         // Extract the current batch, group, filter cluster, and output line
         // from the starting work index.
@@ -580,14 +758,16 @@ struct MLAS_NCHWC_GROUPED_CONV_ALGORITHM : MLAS_NCHWC_CONV_ALGORITHM
         Input += BatchGroup * InputChannels * InputSize;
 
         Output += BatchGroup * OutputChannels * OutputSize;
-        Output += BlockSize * FilterSet * FilterSetSize * OutputSize;
+        const size_t FilterBlockOffset = FilterSetBlockOffset(FilterSet);
+
+        Output += BlockSize * FilterBlockOffset * OutputSize;
 
         Filter += Group * OutputChannels * InputChannels * KernelSize;
-        Filter += BlockSize * FilterSet * FilterSetSize * InputChannels * KernelSize;
+        Filter += BlockSize * FilterBlockOffset * InputChannels * KernelSize;
 
         if (Bias != nullptr) {
             Bias += Group * OutputChannels;
-            Bias += BlockSize * FilterSet * FilterSetSize;
+            Bias += BlockSize * FilterBlockOffset;
         }
 
         //
@@ -595,6 +775,19 @@ struct MLAS_NCHWC_GROUPED_CONV_ALGORITHM : MLAS_NCHWC_CONV_ALGORITHM
         //
 
         ComputeFilterCount();
+    }
+
+    void PrepareWork(ptrdiff_t Index)
+    {
+        const size_t TotalWork = BatchCount * GroupCount * FilterSetCount * OutputHeight;
+
+        size_t WorkIndex;
+
+        MlasPartitionWork(Index, WorkBlock->tids, TotalWork, &WorkIndex, &WorkRemaining);
+
+        if (WorkRemaining > 0) {
+            SeekToWork(WorkIndex);
+        }
     }
 
     void CompleteWork(size_t WorkThisIteration)
@@ -645,9 +838,66 @@ struct MLAS_NCHWC_GROUPED_CONV_ALGORITHM : MLAS_NCHWC_CONV_ALGORITHM
             ph = 0;
         }
     }
+
+    //
+    // Map a cost boundary to a work item index. See MlasNchwcCostToWorkIndex in
+    // mlasi.h, which holds the mapping and its worked example; it lives there so
+    // the partitioning math can be unit tested independently of a convolution.
+    //
+
+    size_t CostToWorkIndex(size_t Cost, size_t TotalBlockedFilters, size_t LastSetFilterCount) const
+    {
+        return MlasNchwcCostToWorkIndex(Cost, OutputHeight, FilterSetCount, FilterSetSize,
+                                        TotalBlockedFilters, LastSetFilterCount);
+    }
+
+    //
+    // Partition proportionally to FLOP cost rather than uniformly by work item.
+    // Work items belonging to a ragged last filter set (FilterCount less than
+    // FilterSetSize) cost proportionally less than items of full sets, so a
+    // uniform index split leaves threads with unequal amounts of compute.
+    //
+
+    void PrepareWorkWeighted(ptrdiff_t Index)
+    {
+        // Balanced sets are all equal size, so the uniform partitioner is exact.
+        if (BalancedFilterSets) {
+            PrepareWork(Index);
+            return;
+        }
+
+        const size_t TotalBlockedFilters = OutputChannels / BlockSize;
+        const size_t LastSetFilterCount =
+            TotalBlockedFilters - (FilterSetCount - 1) * FilterSetSize;
+
+        const size_t TotalCost = BatchCount * GroupCount * TotalBlockedFilters * OutputHeight;
+
+        size_t CostStart;
+        size_t CostCount;
+
+        MlasPartitionWork(Index, WorkBlock->tids, TotalCost, &CostStart, &CostCount);
+
+        const size_t WorkIndexBegin =
+            CostToWorkIndex(CostStart, TotalBlockedFilters, LastSetFilterCount);
+        const size_t WorkIndexEnd =
+            CostToWorkIndex(CostStart + CostCount, TotalBlockedFilters, LastSetFilterCount);
+
+        WorkRemaining = WorkIndexEnd - WorkIndexBegin;
+
+        //
+        // Skip the seek when this thread received no work. TotalCost below tids
+        // leaves surplus threads with an empty cost interval starting at
+        // TotalCost, which maps to WorkIndexBegin == TotalWork; seeking there
+        // would advance the buffer pointers past the end of their tensors.
+        //
+
+        if (WorkRemaining > 0) {
+            SeekToWork(WorkIndexBegin);
+        }
+    }
 };
 
-constexpr size_t MLAS_NCHWC_GROUPED_CONV_ALGORITHM::FilterSetSize;
+constexpr size_t MLAS_NCHWC_GROUPED_CONV_ALGORITHM::MaximumFilterSetSize;
 
 //
 // Implementation of the direct convolution algorithm where the input buffer is
@@ -667,7 +917,7 @@ struct MLAS_NCHWC_CONV_NCHWC_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
         // Setup the convolution state based on the thread index.
         //
 
-        PrepareWork(Index);
+        PrepareWorkWeighted(Index);
 
         //
         // Loop until all of the work has been completed.
@@ -903,7 +1153,7 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
         // Setup the convolution state based on the thread index.
         //
 
-        PrepareWork(Index);
+        PrepareWorkWeighted(Index);
 
         //
         // Loop until all of the work has been completed.
@@ -913,6 +1163,25 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
         const size_t InputStrideBytes = BlockSize * InputSize * sizeof(float);
         const size_t FilterStrideBytes = BlockSize * InputChannels * sizeof(float);
         const size_t OutputStrideBytes = BlockSize * OutputSize * sizeof(float);
+
+        //
+        // Determine the maximum number of input channels to accumulate per kernel
+        // invocation. Shrinking the batch size causes a slowdown from additional
+        // flushing of intermediate results to the output tensor. Extending the
+        // batch size causes a slowdown from processor cache thrashing. The default
+        // may be overridden via session configuration for tuning; the value is
+        // rounded up to a multiple of the block size expected by the kernel.
+        //
+
+        size_t MaximumInputChannelBatch = 128;
+
+        if (WorkBlock->BackendKernelSelectorConfig != nullptr &&
+            WorkBlock->BackendKernelSelectorConfig->nchwc_pointwise_conv_max_input_channel_batch != 0) {
+            const size_t RequestedBatch =
+                WorkBlock->BackendKernelSelectorConfig->nchwc_pointwise_conv_max_input_channel_batch;
+            MaximumInputChannelBatch =
+                ((RequestedBatch + BlockSize - 1) / BlockSize) * BlockSize;
+        }
 
 #if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || (defined(MLAS_TARGET_ARM64) && defined(MLAS_USE_ARM_NEON_NCHWC)) || (defined(MLAS_TARGET_RISCV64) && defined(MLAS_USE_RVV))
         MLAS_CONV_POINTWISE_FLOAT_KERNEL* Kernel = GetMlasPlatform().ConvPointwiseFloatKernel;
@@ -953,10 +1222,6 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
             //
             // Apply the convolution kernel to batches of the input tensor.
             //
-            // Shrinking the batch size causes a slowdown from additional
-            // flushing of intermediate results to the output tensor. Extending
-            // the batch sizes causes a slowdown from processor cache thrashing.
-            //
 
             const float* input = Input + BlockSize * (ph * StrideHeight * InputWidth);
             const float* filter = Filter;
@@ -964,8 +1229,6 @@ struct MLAS_NCHWC_CONV_POINTWISE_ALGORITHM : MLAS_NCHWC_GROUPED_CONV_ALGORITHM
 
             size_t InputChannelBatch = 0;
             for (size_t ic = 0; ic < InputChannels; ) {
-
-                constexpr size_t MaximumInputChannelBatch = 128;
 
                 InputChannelBatch = std::min(InputChannels - ic, MaximumInputChannelBatch);
 
@@ -1967,3 +2230,4 @@ MlasPoolAverageIncludePadFloatKernel(
 }
 
 #endif
+
