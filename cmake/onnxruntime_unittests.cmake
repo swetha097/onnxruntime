@@ -1009,7 +1009,8 @@ if (onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS AND NOT onnxruntime_BUILD_CUDA_EP_
   onnxruntime_add_include_to_target(onnxruntime_providers_cuda_ut GTest::gtest GTest::gmock)
   add_dependencies(onnxruntime_providers_cuda_ut onnxruntime_test_utils)
   target_include_directories(onnxruntime_providers_cuda_ut PRIVATE ${ONNXRUNTIME_ROOT}/core/mickey)
-  target_link_libraries(onnxruntime_providers_cuda_ut PRIVATE GTest::gtest GTest::gmock ${ONNXRUNTIME_MLAS_LIBS} onnxruntime_test_utils)
+  target_link_libraries(onnxruntime_providers_cuda_ut PRIVATE GTest::gtest GTest::gmock ${ONNXRUNTIME_MLAS_LIBS}
+                                                        onnxruntime_test_utils ${PROTOBUF_LIB})
   # Link architecture-specific OBJECT libraries (same as onnxruntime_providers_cuda).
   if(TARGET onnxruntime_providers_cuda_sm90_tma)
     target_link_libraries(onnxruntime_providers_cuda_ut PRIVATE onnxruntime_providers_cuda_sm90_tma)
@@ -1022,6 +1023,9 @@ if (onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS AND NOT onnxruntime_BUILD_CUDA_EP_
   endif()
   if(TARGET onnxruntime_providers_cuda_llm)
     target_link_libraries(onnxruntime_providers_cuda_ut PRIVATE onnxruntime_providers_cuda_llm)
+  endif()
+  if(TARGET onnxruntime_providers_cuda_llm_fp4)
+    target_link_libraries(onnxruntime_providers_cuda_ut PRIVATE onnxruntime_providers_cuda_llm_fp4)
   endif()
   if (MSVC)
     # Cutlass code has an issue with the following:
@@ -1038,6 +1042,7 @@ if (onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS AND onnxruntime_BUILD_CUDA_EP_AS_P
   set(onnxruntime_test_providers_cuda_plugin_internal_test_src
     "${TEST_SRC_DIR}/providers/cuda/test_cases/allocator_cuda_test.cc"
     "${TEST_SRC_DIR}/providers/cuda/test_cases/cuda_utils_test.cc"
+    "${TEST_SRC_DIR}/providers/cuda/test_cases/packed_attention_workspace_header_test.cc"
     "${TEST_SRC_DIR}/providers/cuda/test_cases/reduction_functions_test.cc"
   )
   # matmul_nbits_workspace_test.cc / matmul_nbits_e2e_workspace_test.cc are intentionally excluded
@@ -1063,6 +1068,7 @@ if (onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS AND onnxruntime_BUILD_CUDA_EP_AS_P
       "${ONNXRUNTIME_ROOT}/core/providers/cuda/cudnn_common.cc"
       "${ONNXRUNTIME_ROOT}/core/providers/cuda/cudnn_loader.cc"
       "${ONNXRUNTIME_ROOT}/core/providers/cuda/cufft_loader.cc"
+      "${ONNXRUNTIME_ROOT}/core/providers/cuda/fpgeneric.cu"
       "${ONNXRUNTIME_ROOT}/core/providers/cuda/reduction/reduction_functions.cc"
       "${ONNXRUNTIME_ROOT}/core/providers/cuda/reduction/reduction_functions.cu"
       "${TEST_SRC_DIR}/providers/cuda/test_cases/cuda_plugin_test_shims.cc"
@@ -1159,6 +1165,15 @@ endif()
 
 partition_provider_test_srcs(all_tests onnxruntime_provider_test_srcs onnxruntime_test_all_srcs)
 
+if (onnxruntime_USE_OPENVINO)
+  # ov_protobuf_utils.cpp lives under core/providers (not test/), so partition_provider_test_srcs
+  # would route it to onnxruntime_test_all. Append it here after the partition so it is compiled into
+  # onnxruntime_provider_test alongside openvino_ov_protobuf_utils_test.cc, because the OpenVINO EP
+  # is a dynamically-loaded module and is not statically linked into the test binary.
+  list(APPEND onnxruntime_provider_test_srcs
+       ${ONNXRUNTIME_ROOT}/core/providers/openvino/ov_protobuf_utils.cpp)
+endif()
+
 # Workarounds for onnxruntime test targets.
 function(onnxruntime_apply_test_target_workarounds target)
   if (MSVC)
@@ -1231,6 +1246,20 @@ if (onnxruntime_USE_CUDA AND onnxruntime_BUILD_CUDA_EP_AS_PLUGIN)
     ORT_UNIT_TEST_ENABLE_DYNAMIC_PLUGIN_EP_USAGE
     ORT_UNIT_TEST_CUDA_PLUGIN_EP_LIBRARY_PATH="$<TARGET_FILE_NAME:onnxruntime_providers_cuda_plugin>"
     ORT_UNIT_TEST_HAS_CUDA_PLUGIN_EP=1)
+endif()
+
+if (onnxruntime_USE_WEBGPU AND onnxruntime_USE_EP_API_ADAPTERS)
+  # Route the WebGPU EP through the dynamic plugin EP infrastructure in plugin builds
+  # (--use_webgpu shared_lib). Same rationale as the CUDA-as-plugin block above: without initializing the
+  # infra in test_main.cc, WebGpuExecutionProviderWithOptions() (default_providers.cc, adapters branch)
+  # returns null and every WebGPU test skips itself, leaving the plugin path with no test coverage.
+  target_compile_definitions(onnxruntime_test_all PRIVATE
+    ORT_UNIT_TEST_ENABLE_DYNAMIC_PLUGIN_EP_USAGE
+    ORT_UNIT_TEST_WEBGPU_PLUGIN_EP_LIBRARY_PATH="$<TARGET_FILE_NAME:onnxruntime_providers_webgpu>"
+    ORT_UNIT_TEST_HAS_WEBGPU_PLUGIN_EP=1)
+  # The plugin EP DLL is dlopen'd at test-run time (not linked), so add an explicit build-order
+  # dependency to ensure it (and its co-located dawn/dxcompiler DLLs) exist before the tests run.
+  add_dependencies(onnxruntime_test_all onnxruntime_providers_webgpu)
 endif()
 
 if (MSVC)
@@ -1520,7 +1549,8 @@ if (NOT onnxruntime_ENABLE_TRAINING_TORCH_INTEROP)
       ${BENCHMARK_DIR}/activation.cc
       ${BENCHMARK_DIR}/quantize.cc
       ${BENCHMARK_DIR}/reduceminmax.cc
-      ${BENCHMARK_DIR}/layer_normalization.cc)
+      ${BENCHMARK_DIR}/layer_normalization.cc
+      $<$<BOOL:${onnxruntime_USE_WEBGPU}>:${BENCHMARK_DIR}/paged_attention.cc>)
     target_include_directories(onnxruntime_benchmark PRIVATE ${ONNXRUNTIME_ROOT} ${onnxruntime_graph_header} ${ONNXRUNTIME_ROOT}/core/mlas/inc)
     target_compile_definitions(onnxruntime_benchmark PRIVATE BENCHMARK_STATIC_DEFINE)
     target_compile_definitions(onnxruntime_benchmark PRIVATE ${mlas_private_compile_definitions})
@@ -2606,6 +2636,11 @@ if (onnxruntime_BUILD_SHARED_LIB AND
   file(GLOB onnxruntime_autoep_test_SRC "${ONNXRUNTIME_AUTOEP_TEST_SRC_DIR}/*.h"
                                         "${ONNXRUNTIME_AUTOEP_TEST_SRC_DIR}/*.cc")
 
+  if (NOT onnxruntime_USE_WEBGPU OR NOT onnxruntime_USE_EP_API_ADAPTERS)
+    list(REMOVE_ITEM onnxruntime_autoep_test_SRC
+         "${ONNXRUNTIME_AUTOEP_TEST_SRC_DIR}/test_webgpu_allocators.cc")
+  endif()
+
   set(onnxruntime_autoep_test_LIBS onnxruntime_mocked_allocator ${ONNXRUNTIME_TEST_LIBS} onnxruntime_test_utils
                                    onnx_proto onnx ${onnxruntime_EXTERNAL_LIBRARIES})
 
@@ -2637,6 +2672,12 @@ if (onnxruntime_BUILD_SHARED_LIB AND
           LIBS ${onnxruntime_autoep_test_LIBS}
           DEPENDS ${all_dependencies} example_plugin_ep example_plugin_ep_virt_gpu example_plugin_ep_kernel_registry
   )
+
+  if (onnxruntime_USE_WEBGPU AND onnxruntime_USE_EP_API_ADAPTERS)
+    # The WebGPU plugin is loaded at test-run time, so ensure a focused auto-EP test build produces it and its
+    # co-located runtime dependencies.
+    add_dependencies(onnxruntime_autoep_test onnxruntime_providers_webgpu)
+  endif()
 endif()
 
 if (onnxruntime_BUILD_SHARED_LIB AND NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten" AND NOT onnxruntime_MINIMAL_BUILD)
